@@ -22,6 +22,7 @@ VideoGeniusAI is a desktop app in Python for turning an idea into a structured v
 - One-click installation of a recommended base ComfyUI checkpoint
 - GPU detection plus multi-worker ComfyUI discovery on common local ports
 - Richer video progress feedback with percentage and current render phase
+- Startup-safe window restore so the GUI comes back on-screen after monitor/layout changes
 - Optional local AI rendering through ComfyUI plus built-in Windows narration or optional Piper narration
 - Simplified quick flow with a single end-to-end `Generar video completo` action
 - Persistent `config.json`, window position memory and auto-save

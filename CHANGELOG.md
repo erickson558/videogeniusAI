@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.0.11 - 2026-03-18
+
+- Hardened startup so the main window is restored on-screen even when a saved geometry would place it outside the current monitor layout.
+- Reworked the initial window show sequence to avoid hidden-start issues on `.pyw` and packaged `.exe` launches.
+- Fixed shutdown cleanup by cancelling pending Tk scheduled jobs before destroying the app, preventing Tcl errors during quick closes.
+
 ## V0.0.10 - 2026-03-18
 
 - Added GPU detection and surfaced multi-GPU guidance directly in the guided setup summary.

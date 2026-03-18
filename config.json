@@ -1,5 +1,5 @@
 {
-  "app_version": "V0.0.10",
+  "app_version": "V0.0.11",
   "appearance_mode": "dark",
   "lmstudio_base_url": "http://127.0.0.1:1234",
   "model": "deepseek/deepseek-r1-0528-qwen3-8b",

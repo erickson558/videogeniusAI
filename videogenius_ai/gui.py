@@ -64,7 +64,12 @@ ctk.set_default_color_theme("blue")
 class VideoGeniusApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        self.withdraw()
+        self._alpha_hidden = False
+        try:
+            self.attributes("-alpha", 0.0)
+            self._alpha_hidden = True
+        except tk.TclError:
+            self._alpha_hidden = False
         self.logger = configure_logging()
         self.config_manager = ConfigManager()
         self.app_config: AppConfig = self.config_manager.config
@@ -83,6 +88,15 @@ class VideoGeniusApp(ctk.CTk):
         self._save_job_id: str | None = None
         self._geometry_job_id: str | None = None
         self._countdown_job_id: str | None = None
+        self._process_queue_job_id: str | None = None
+        self._startup_show_job_id: str | None = None
+        self._startup_front_job_id: str | None = None
+        self._topmost_reset_job_id: str | None = None
+        self._inspect_env_job_id: str | None = None
+        self._load_models_job_id: str | None = None
+        self._auto_start_job_id: str | None = None
+        self._zoom_job_id: str | None = None
+        self._auto_close_trigger_job_id: str | None = None
         self._auto_close_remaining = max(1, int(self.app_config.auto_close_seconds))
 
         self._configure_root()
@@ -95,17 +109,17 @@ class VideoGeniusApp(ctk.CTk):
         self._bind_activity_reset()
         self._load_history_buttons()
         self._set_status("Ready. Configure LM Studio and generate a project.")
-        self._finalize_initial_window()
-        self.after(150, self._process_task_queue)
-        self.after(1000, self._tick_auto_close)
-        self.after(2200, self.inspect_environment)
-        self.after(900, self._load_models_background)
+        self._schedule_initial_window_show()
+        self._process_queue_job_id = self.after(150, self._process_task_queue)
+        self._countdown_job_id = self.after(1000, self._tick_auto_close)
+        self._inspect_env_job_id = self.after(2200, self.inspect_environment)
+        self._load_models_job_id = self.after(900, self._load_models_background)
         if self.app_config.auto_start_enabled:
-            self.after(1200, self.start_generation)
+            self._auto_start_job_id = self.after(1200, self.start_generation)
 
     def _configure_root(self) -> None:
         self.title(f"{APP_NAME} {DISPLAY_VERSION}")
-        self.geometry(sanitize_window_geometry(self.app_config.window_geometry))
+        self.geometry(self._geometry_for_current_screen(self.app_config.window_geometry))
         self.minsize(1320, 840)
         self.configure(fg_color=THEME["app_bg"])
         self.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -117,15 +131,54 @@ class VideoGeniusApp(ctk.CTk):
             except tk.TclError:
                 self.logger.warning("Unable to load application icon from %s", icon_path)
         if self.app_config.window_zoomed:
-            self.after(300, lambda: self.state("zoomed"))
+            self._zoom_job_id = self.after(300, lambda: self.state("zoomed"))
+
+    def _geometry_for_current_screen(self, geometry: str) -> str:
+        safe_geometry = sanitize_window_geometry(geometry)
+        try:
+            size_part, x_part, y_part = safe_geometry.replace("+", " +").replace("-", " -").split()
+            width_text, height_text = size_part.split("x", 1)
+            width = int(width_text)
+            height = int(height_text)
+            x_pos = int(x_part)
+            y_pos = int(y_part)
+            screen_width = max(width, self.winfo_screenwidth())
+            screen_height = max(height, self.winfo_screenheight())
+            min_visible_x = 120 - width
+            max_x = max(0, screen_width - 120)
+            min_visible_y = 0
+            max_y = max(0, screen_height - 80)
+            clamped_x = min(max(x_pos, min_visible_x), max_x)
+            clamped_y = min(max(y_pos, min_visible_y), max_y)
+            return f"{width}x{height}{clamped_x:+d}{clamped_y:+d}"
+        except (ValueError, tk.TclError):
+            return safe_geometry
+
+    def _schedule_initial_window_show(self) -> None:
+        self._startup_show_job_id = self.after(0, self._finalize_initial_window)
+        self._startup_front_job_id = self.after(120, self._bring_window_to_front)
+
+    def _bring_window_to_front(self) -> None:
+        try:
+            self.lift()
+            self.attributes("-topmost", True)
+            self.focus_force()
+            self._topmost_reset_job_id = self.after(350, lambda: self.attributes("-topmost", False))
+        except tk.TclError:
+            pass
 
     def _finalize_initial_window(self) -> None:
         self.update_idletasks()
         if self.app_config.window_zoomed:
             self.state("zoomed")
         else:
-            self.geometry(sanitize_window_geometry(self.app_config.window_geometry))
-        self.deiconify()
+            self.geometry(self._geometry_for_current_screen(self.app_config.window_geometry))
+        self.title(f"{APP_NAME} {DISPLAY_VERSION}")
+        if self._alpha_hidden:
+            try:
+                self.attributes("-alpha", 1.0)
+            except tk.TclError:
+                pass
 
     def _normalize_appearance_mode(self, value: str) -> str:
         normalized = (value or "dark").strip().lower()
@@ -904,7 +957,20 @@ class VideoGeniusApp(ctk.CTk):
         self._save_job_id = self.after(250, self._save_gui_state)
 
     def _cancel_scheduled_jobs(self) -> None:
-        for attribute in ["_save_job_id", "_geometry_job_id", "_countdown_job_id"]:
+        for attribute in [
+            "_save_job_id",
+            "_geometry_job_id",
+            "_countdown_job_id",
+            "_process_queue_job_id",
+            "_startup_show_job_id",
+            "_startup_front_job_id",
+            "_topmost_reset_job_id",
+            "_inspect_env_job_id",
+            "_load_models_job_id",
+            "_auto_start_job_id",
+            "_zoom_job_id",
+            "_auto_close_trigger_job_id",
+        ]:
             job_id = getattr(self, attribute)
             if job_id:
                 try:
@@ -1173,7 +1239,7 @@ class VideoGeniusApp(ctk.CTk):
             pass
         finally:
             if not self._closing and self.winfo_exists():
-                self.after(150, self._process_task_queue)
+                self._process_queue_job_id = self.after(150, self._process_task_queue)
 
     def _toggle_busy_state(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
@@ -1652,7 +1718,7 @@ class VideoGeniusApp(ctk.CTk):
             self._auto_close_remaining -= 1
             if self._auto_close_remaining <= 0:
                 self._set_status("Auto-close timer reached zero. Closing application.")
-                self.after(150, self._on_close)
+                self._auto_close_trigger_job_id = self.after(150, self._on_close)
                 return
         self._update_countdown_label()
         self._countdown_job_id = self.after(1000, self._tick_auto_close)
