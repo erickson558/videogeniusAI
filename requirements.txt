@@ -1,0 +1,5 @@
+customtkinter==5.2.2
+Pillow==11.2.1
+PyInstaller==6.19.0
+requests==2.32.4
+

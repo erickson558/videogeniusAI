@@ -1,0 +1,9 @@
+2026-03-18 00:00:00,000 | INFO | videogenius_ai | Application log initialized.
+
+2026-03-18 11:09:11,158 | ERROR | videogenius_ai | Background task failed: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/models (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+Traceback (most recent call last):
+  File "videogenius_ai\gui.py", line 623, in runner
+    worker()
+  File "videogenius_ai\gui.py", line 741, in worker
+    raise requests.RequestException(message)
+requests.exceptions.RequestException: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/models (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))

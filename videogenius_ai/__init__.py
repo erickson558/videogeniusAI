@@ -1,0 +1,4 @@
+from .version import APP_NAME, APP_VERSION, DISPLAY_VERSION
+
+__all__ = ["APP_NAME", "APP_VERSION", "DISPLAY_VERSION"]
+

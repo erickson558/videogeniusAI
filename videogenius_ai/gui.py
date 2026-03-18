@@ -1,0 +1,946 @@
+from __future__ import annotations
+
+import json
+import os
+import queue
+import threading
+import tkinter as tk
+from datetime import datetime
+from pathlib import Path
+from tkinter import filedialog
+from typing import Any, Callable
+
+import customtkinter as ctk
+import requests
+
+from .config import AppConfig, ConfigManager
+from .export_service import ExportService
+from .generator_service import SceneGeneratorService
+from .history_service import HistoryEntry, HistoryService
+from .lmstudio_client import LMStudioClient
+from .logging_utils import configure_logging
+from .models import GenerationRequest, VideoProject
+from .paths import APP_ROOT
+from .version import APP_NAME, DISPLAY_VERSION
+from .video_service import StoryboardVideoService
+
+ctk.set_appearance_mode("light")
+ctk.set_default_color_theme("blue")
+
+
+class VideoGeniusApp(ctk.CTk):
+    def __init__(self) -> None:
+        super().__init__()
+        self.logger = configure_logging()
+        self.config_manager = ConfigManager()
+        self.app_config: AppConfig = self.config_manager.config
+        self.generator_service = SceneGeneratorService()
+        self.history_service = HistoryService()
+        self.export_service = ExportService()
+        self.video_service = StoryboardVideoService()
+
+        self.current_project: VideoProject | None = None
+        self.current_history_path: Path | None = None
+        self.task_queue: queue.Queue[dict[str, Any]] = queue.Queue()
+        self.is_busy = False
+        self._save_job_id: str | None = None
+        self._geometry_job_id: str | None = None
+        self._countdown_job_id: str | None = None
+        self._auto_close_remaining = max(1, int(self.app_config.auto_close_seconds))
+
+        self._configure_root()
+        self._create_variables()
+        self._build_menu()
+        self._build_layout()
+        self._bind_shortcuts()
+        self._bind_activity_reset()
+        self._load_history_buttons()
+        self._set_status("Ready. Configure LM Studio and generate a project.")
+        self.after(150, self._process_task_queue)
+        self.after(1000, self._tick_auto_close)
+        self.after(900, self._load_models_background)
+        if self.app_config.auto_start_enabled:
+            self.after(1200, self.start_generation)
+
+    def _configure_root(self) -> None:
+        self.title(f"{APP_NAME} {DISPLAY_VERSION}")
+        self.geometry(self.app_config.window_geometry)
+        self.minsize(1320, 840)
+        self.configure(fg_color="#E6ECF4")
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.report_callback_exception = self._report_callback_exception
+        icon_path = APP_ROOT / f"{APP_NAME.lower()}.ico"
+        if icon_path.exists():
+            try:
+                self.iconbitmap(str(icon_path))
+            except tk.TclError:
+                self.logger.warning("Unable to load application icon from %s", icon_path)
+        if self.app_config.window_zoomed:
+            self.after(300, lambda: self.state("zoomed"))
+
+    def _create_variables(self) -> None:
+        self.base_url_var = tk.StringVar(value=self.app_config.lmstudio_base_url)
+        self.model_var = tk.StringVar(value=self.app_config.model)
+        self.api_key_var = tk.StringVar(value=self.app_config.api_key)
+        self.temperature_var = tk.DoubleVar(value=self.app_config.temperature)
+        self.scene_count_var = tk.StringVar(value=str(self.app_config.scene_count))
+        self.language_var = tk.StringVar(value=self.app_config.output_language)
+        self.duration_var = tk.StringVar(value=str(self.app_config.estimated_duration_seconds))
+        self.visual_style_var = tk.StringVar(value=self.app_config.visual_style)
+        self.audience_var = tk.StringVar(value=self.app_config.audience)
+        self.tone_var = tk.StringVar(value=self.app_config.narrative_tone)
+        self.format_var = tk.StringVar(value=self.app_config.video_format)
+        self.mode_var = tk.StringVar(value=self.app_config.generation_mode)
+        self.output_dir_var = tk.StringVar(value=self.app_config.output_dir)
+        self.auto_start_var = tk.BooleanVar(value=self.app_config.auto_start_enabled)
+        self.auto_close_var = tk.BooleanVar(value=self.app_config.auto_close_enabled)
+        self.auto_close_seconds_var = tk.StringVar(value=str(self.app_config.auto_close_seconds))
+        self.max_tokens_var = tk.StringVar(value=str(self.app_config.max_tokens))
+        self.timeout_var = tk.StringVar(value=str(self.app_config.request_timeout_seconds))
+        self.retries_var = tk.StringVar(value=str(self.app_config.json_retry_attempts))
+        self.show_api_key_var = tk.BooleanVar(value=False)
+
+        for variable in [
+            self.base_url_var,
+            self.model_var,
+            self.api_key_var,
+            self.temperature_var,
+            self.scene_count_var,
+            self.language_var,
+            self.duration_var,
+            self.visual_style_var,
+            self.audience_var,
+            self.tone_var,
+            self.format_var,
+            self.mode_var,
+            self.output_dir_var,
+            self.auto_start_var,
+            self.auto_close_var,
+            self.auto_close_seconds_var,
+            self.max_tokens_var,
+            self.timeout_var,
+            self.retries_var,
+        ]:
+            variable.trace_add("write", lambda *_: self._schedule_save())
+
+    def _build_menu(self) -> None:
+        menu_bar = tk.Menu(self)
+
+        file_menu = tk.Menu(menu_bar, tearoff=0)
+        file_menu.add_command(label="Nuevo", accelerator="Ctrl+N", command=self.reset_form)
+        file_menu.add_command(label="Probar conexion", accelerator="Ctrl+L", command=self.test_connection)
+        file_menu.add_command(label="Generar guion", accelerator="Ctrl+G", command=self.start_generation)
+        file_menu.add_separator()
+        file_menu.add_command(label="Exportar JSON", accelerator="Ctrl+J", command=self.export_json)
+        file_menu.add_command(label="Exportar TXT", accelerator="Ctrl+T", command=self.export_txt)
+        file_menu.add_command(label="Exportar CSV", accelerator="Ctrl+E", command=self.export_csv)
+        file_menu.add_command(label="Generar video", accelerator="Ctrl+M", command=self.generate_video)
+        file_menu.add_separator()
+        file_menu.add_command(label="Abrir carpeta de salida", accelerator="Ctrl+O", command=self.open_output_folder)
+        file_menu.add_command(label="Salir", accelerator="Ctrl+Q", command=self._on_close)
+        menu_bar.add_cascade(label="Archivo", menu=file_menu)
+
+        help_menu = tk.Menu(menu_bar, tearoff=0)
+        help_menu.add_command(label="About", accelerator="F1", command=self.show_about_dialog)
+        menu_bar.add_cascade(label="Ayuda", menu=help_menu)
+        self.config(menu=menu_bar)
+
+    def _bind_shortcuts(self) -> None:
+        self.bind_all("<Control-n>", lambda event: self.reset_form())
+        self.bind_all("<Control-l>", lambda event: self.test_connection())
+        self.bind_all("<Control-g>", lambda event: self.start_generation())
+        self.bind_all("<Control-j>", lambda event: self.export_json())
+        self.bind_all("<Control-t>", lambda event: self.export_txt())
+        self.bind_all("<Control-e>", lambda event: self.export_csv())
+        self.bind_all("<Control-m>", lambda event: self.generate_video())
+        self.bind_all("<Control-o>", lambda event: self.open_output_folder())
+        self.bind_all("<Control-q>", lambda event: self._on_close())
+        self.bind_all("<F1>", lambda event: self.show_about_dialog())
+
+    def _bind_activity_reset(self) -> None:
+        self.bind_all("<KeyPress>", lambda event: self._reset_auto_close_timer())
+        self.bind_all("<ButtonPress>", lambda event: self._reset_auto_close_timer())
+        self.bind("<Configure>", self._on_configure)
+
+    def _build_layout(self) -> None:
+        self.grid_columnconfigure(0, weight=0)
+        self.grid_columnconfigure(1, weight=1)
+        self.grid_rowconfigure(0, weight=1)
+        self.grid_rowconfigure(1, weight=0)
+
+        self.sidebar = ctk.CTkScrollableFrame(
+            self,
+            width=410,
+            fg_color="#102542",
+            corner_radius=26,
+            border_width=0,
+        )
+        self.sidebar.grid(row=0, column=0, padx=(18, 10), pady=(18, 10), sticky="nsew")
+        self.sidebar.grid_columnconfigure(0, weight=1)
+
+        self.main_panel = ctk.CTkFrame(self, fg_color="#F8FAFC", corner_radius=28)
+        self.main_panel.grid(row=0, column=1, padx=(10, 18), pady=(18, 10), sticky="nsew")
+        self.main_panel.grid_columnconfigure(0, weight=1)
+        self.main_panel.grid_rowconfigure(2, weight=1)
+
+        self.status_bar = ctk.CTkFrame(self, fg_color="#0F172A", corner_radius=18, height=42)
+        self.status_bar.grid(row=1, column=0, columnspan=2, padx=18, pady=(0, 18), sticky="ew")
+        self.status_bar.grid_columnconfigure(0, weight=1)
+        self.status_label = ctk.CTkLabel(
+            self.status_bar,
+            text="",
+            text_color="#E2E8F0",
+            font=ctk.CTkFont("Segoe UI", 13),
+        )
+        self.status_label.grid(row=0, column=0, padx=16, pady=8, sticky="w")
+        self.countdown_label = ctk.CTkLabel(
+            self.status_bar,
+            text=f"{DISPLAY_VERSION} | Auto-close off",
+            text_color="#93C5FD",
+            font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
+        )
+        self.countdown_label.grid(row=0, column=1, padx=16, pady=8, sticky="e")
+
+        self._build_sidebar()
+        self._build_main_panel()
+
+    def _build_sidebar(self) -> None:
+        hero = ctk.CTkFrame(self.sidebar, fg_color="#08101F", corner_radius=26)
+        hero.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 14))
+        hero.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            hero,
+            text=APP_NAME,
+            text_color="#F8FAFC",
+            font=ctk.CTkFont("Segoe UI Variable Display", 28, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 4))
+        ctk.CTkLabel(
+            hero,
+            text=f"{DISPLAY_VERSION}  |  LM Studio video authoring desktop",
+            text_color="#38BDF8",
+            font=ctk.CTkFont("Segoe UI", 13),
+        ).grid(row=1, column=0, sticky="w", padx=18, pady=(0, 4))
+        ctk.CTkLabel(
+            hero,
+            text="Turn an idea into script, prompts, storyboard and MP4 without blocking the UI.",
+            text_color="#CBD5E1",
+            justify="left",
+            wraplength=340,
+            font=ctk.CTkFont("Segoe UI", 14),
+        ).grid(row=2, column=0, sticky="w", padx=18, pady=(0, 16))
+
+        row = 1
+        topic_card = self._make_card(self.sidebar, "Project brief", "Describe the idea the model should develop.")
+        topic_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
+        self.topic_text = ctk.CTkTextbox(
+            topic_card,
+            height=120,
+            fg_color="#EDF2F7",
+            text_color="#0F172A",
+            border_width=1,
+            border_color="#D97706",
+        )
+        self.topic_text.grid(row=2, column=0, padx=14, pady=(4, 14), sticky="ew")
+        self.topic_text.insert("1.0", self.app_config.video_topic)
+        self.topic_text.bind("<KeyRelease>", lambda event: self._schedule_save())
+        row += 1
+
+        profile_card = self._make_card(self.sidebar, "Creative profile", "The story parameters are all saved automatically.")
+        profile_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
+        self._make_labeled_entry(profile_card, 2, "Visual style", self.visual_style_var)
+        self._make_labeled_combo(profile_card, 4, "Audience", self.audience_var, ["General", "Gamers", "Students", "Professionals", "Children"])
+        self._make_labeled_combo(profile_card, 6, "Narrative tone", self.tone_var, ["Cinematic and immersive", "Educational", "Epic", "Emotional", "Fast-paced"])
+        self._make_labeled_combo(profile_card, 8, "Video format", self.format_var, ["YouTube Short", "TikTok", "Instagram Reel", "YouTube Long", "Trailer"])
+        row += 1
+
+        lm_card = self._make_card(self.sidebar, "LM Studio", "OpenAI-compatible local backend settings.")
+        lm_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
+        self._make_labeled_entry(lm_card, 2, "Base URL", self.base_url_var)
+        self.model_combo = self._make_labeled_combo(lm_card, 4, "Model", self.model_var, [""])
+
+        ctk.CTkLabel(
+            lm_card,
+            text="API key (optional)",
+            text_color="#E2E8F0",
+            font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
+        ).grid(row=6, column=0, sticky="w", padx=14, pady=(10, 4))
+        api_row = ctk.CTkFrame(lm_card, fg_color="transparent")
+        api_row.grid(row=7, column=0, padx=14, pady=(0, 8), sticky="ew")
+        api_row.grid_columnconfigure(0, weight=1)
+        self.api_key_entry = ctk.CTkEntry(api_row, textvariable=self.api_key_var, show="*", fg_color="#EDF2F7", text_color="#0F172A")
+        self.api_key_entry.grid(row=0, column=0, sticky="ew")
+        self.show_api_key_button = ctk.CTkButton(
+            api_row,
+            text="Mostrar",
+            width=90,
+            command=self.toggle_api_key_visibility,
+            fg_color="#1D4ED8",
+            hover_color="#1E40AF",
+        )
+        self.show_api_key_button.grid(row=0, column=1, padx=(10, 0))
+
+        slider_row = ctk.CTkFrame(lm_card, fg_color="transparent")
+        slider_row.grid(row=8, column=0, padx=14, pady=(6, 2), sticky="ew")
+        slider_row.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(slider_row, text="Temperature", text_color="#E2E8F0", font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(row=0, column=0, sticky="w")
+        self.temperature_value_label = ctk.CTkLabel(slider_row, text=f"{self.temperature_var.get():.2f}", text_color="#38BDF8")
+        self.temperature_value_label.grid(row=0, column=1, sticky="e")
+        self.temperature_slider = ctk.CTkSlider(
+            lm_card,
+            from_=0.0,
+            to=1.5,
+            number_of_steps=30,
+            variable=self.temperature_var,
+            command=self._on_temperature_change,
+            button_color="#F97316",
+            progress_color="#F59E0B",
+        )
+        self.temperature_slider.grid(row=9, column=0, padx=14, pady=(0, 10), sticky="ew")
+
+        self._make_labeled_entry(lm_card, 10, "Scene count", self.scene_count_var)
+        self._make_labeled_combo(lm_card, 12, "Output language", self.language_var, ["Espanol", "English", "Portugues", "Frances"])
+        self._make_labeled_entry(lm_card, 14, "Estimated duration (s)", self.duration_var)
+        row += 1
+
+        advanced_card = self._make_card(self.sidebar, "Automation and advanced", "Saved in config.json next to the app.")
+        advanced_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
+        self._make_labeled_entry(advanced_card, 2, "Output folder", self.output_dir_var)
+        browse_button = ctk.CTkButton(
+            advanced_card,
+            text="Browse",
+            command=self.choose_output_folder,
+            fg_color="#0F766E",
+            hover_color="#115E59",
+        )
+        browse_button.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 10))
+
+        self.auto_start_checkbox = ctk.CTkCheckBox(
+            advanced_card,
+            text="Auto-start generation on launch",
+            variable=self.auto_start_var,
+            checkbox_width=20,
+            checkbox_height=20,
+            text_color="#F8FAFC",
+        )
+        self.auto_start_checkbox.grid(row=5, column=0, sticky="w", padx=14, pady=(2, 6))
+
+        self.auto_close_checkbox = ctk.CTkCheckBox(
+            advanced_card,
+            text="Auto-close after inactivity",
+            variable=self.auto_close_var,
+            checkbox_width=20,
+            checkbox_height=20,
+            text_color="#F8FAFC",
+        )
+        self.auto_close_checkbox.grid(row=6, column=0, sticky="w", padx=14, pady=(2, 6))
+
+        self._make_labeled_entry(advanced_card, 7, "Auto-close seconds", self.auto_close_seconds_var)
+        self._make_labeled_entry(advanced_card, 9, "JSON retry attempts", self.retries_var)
+        self._make_labeled_entry(advanced_card, 11, "Request timeout (s)", self.timeout_var)
+        self._make_labeled_entry(advanced_card, 13, "Max tokens", self.max_tokens_var)
+        row += 1
+
+        actions_card = self._make_card(self.sidebar, "Actions", "Keyboard shortcuts are also available from the menu.")
+        actions_card.grid(row=row, column=0, sticky="ew", padx=10, pady=(8, 18))
+        self.connection_button = self._make_action_button(actions_card, 2, "Probar conexion (Ctrl+L)", "#0284C7", "#0369A1", self.test_connection)
+        self.generate_button = self._make_action_button(actions_card, 3, "Generar guion (Ctrl+G)", "#EA580C", "#C2410C", self.start_generation)
+        self.export_json_button = self._make_action_button(actions_card, 4, "Exportar JSON (Ctrl+J)", "#4F46E5", "#4338CA", self.export_json)
+        self.export_txt_button = self._make_action_button(actions_card, 5, "Exportar TXT (Ctrl+T)", "#2563EB", "#1D4ED8", self.export_txt)
+        self.export_csv_button = self._make_action_button(actions_card, 6, "Exportar CSV (Ctrl+E)", "#0F766E", "#115E59", self.export_csv)
+        self.video_button = self._make_action_button(actions_card, 7, "Generar video final (Ctrl+M)", "#B45309", "#92400E", self.generate_video)
+        self.folder_button = self._make_action_button(actions_card, 8, "Abrir carpeta (Ctrl+O)", "#334155", "#1E293B", self.open_output_folder)
+        self.exit_button = self._make_action_button(actions_card, 9, "Salir (Ctrl+Q)", "#7F1D1D", "#7C2D12", self._on_close)
+
+    def _build_main_panel(self) -> None:
+        header = ctk.CTkFrame(self.main_panel, fg_color="#FFFFFF", corner_radius=24)
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 12))
+        header.grid_columnconfigure(0, weight=1)
+        header.grid_columnconfigure(1, weight=0)
+
+        left = ctk.CTkFrame(header, fg_color="transparent")
+        left.grid(row=0, column=0, sticky="ew", padx=18, pady=18)
+        ctk.CTkLabel(
+            left,
+            text="Video workshop",
+            text_color="#0F172A",
+            font=ctk.CTkFont("Segoe UI Variable Display", 34, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            left,
+            text="Generate structured video projects, review each scene, export assets, and build a storyboard MP4.",
+            wraplength=760,
+            justify="left",
+            text_color="#475569",
+            font=ctk.CTkFont("Segoe UI", 14),
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        self.mode_segment = ctk.CTkSegmentedButton(
+            header,
+            values=["Solo guion", "Guion + prompts", "Proyecto completo"],
+            variable=self.mode_var,
+            selected_color="#F97316",
+            selected_hover_color="#EA580C",
+            unselected_color="#E2E8F0",
+            unselected_hover_color="#CBD5E1",
+            text_color="#0F172A",
+        )
+        self.mode_segment.grid(row=0, column=1, padx=18, pady=18, sticky="e")
+
+        status_strip = ctk.CTkFrame(self.main_panel, fg_color="#0F172A", corner_radius=22)
+        status_strip.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 12))
+        status_strip.grid_columnconfigure(0, weight=1)
+        status_strip.grid_columnconfigure(1, weight=1)
+        self.connection_chip = ctk.CTkLabel(
+            status_strip,
+            text="LM Studio: not tested",
+            text_color="#BFDBFE",
+            font=ctk.CTkFont("Segoe UI", 14, weight="bold"),
+        )
+        self.connection_chip.grid(row=0, column=0, sticky="w", padx=18, pady=12)
+
+        self.progress_bar = ctk.CTkProgressBar(status_strip, progress_color="#F97316", fg_color="#1E293B")
+        self.progress_bar.grid(row=0, column=1, sticky="ew", padx=(0, 18), pady=12)
+        self.progress_bar.set(0)
+
+        self.tab_view = ctk.CTkTabview(
+            self.main_panel,
+            fg_color="#FFFFFF",
+            segmented_button_selected_color="#0F766E",
+            segmented_button_selected_hover_color="#115E59",
+            segmented_button_unselected_color="#E2E8F0",
+            corner_radius=26,
+        )
+        self.tab_view.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 18))
+        self.main_panel.grid_rowconfigure(2, weight=1)
+
+        self.summary_tab = self.tab_view.add("Resumen")
+        self.scenes_tab = self.tab_view.add("Escenas")
+        self.json_tab = self.tab_view.add("JSON")
+        self.history_tab = self.tab_view.add("Historial")
+
+        self.summary_text = self._make_output_textbox(self.summary_tab)
+        self.scenes_text = self._make_output_textbox(self.scenes_tab)
+        self.json_text = self._make_output_textbox(self.json_tab)
+
+        self.history_tab.grid_columnconfigure(0, weight=1)
+        self.history_tab.grid_rowconfigure(1, weight=1)
+        history_header = ctk.CTkFrame(self.history_tab, fg_color="transparent")
+        history_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
+        history_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            history_header,
+            text="Saved projects",
+            text_color="#0F172A",
+            font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkButton(
+            history_header,
+            text="Refresh",
+            command=self._load_history_buttons,
+            fg_color="#1D4ED8",
+            hover_color="#1E40AF",
+            width=110,
+        ).grid(row=0, column=1, sticky="e")
+        self.history_scroll = ctk.CTkScrollableFrame(self.history_tab, fg_color="#F8FAFC", corner_radius=18)
+        self.history_scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self.history_scroll.grid_columnconfigure(0, weight=1)
+
+    def _make_card(self, parent: ctk.CTkBaseClass, title: str, subtitle: str) -> ctk.CTkFrame:
+        card = ctk.CTkFrame(parent, fg_color="#0B1628", corner_radius=22)
+        card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            card,
+            text=title,
+            text_color="#F8FAFC",
+            font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=14, pady=(14, 4))
+        ctk.CTkLabel(
+            card,
+            text=subtitle,
+            text_color="#94A3B8",
+            wraplength=330,
+            justify="left",
+            font=ctk.CTkFont("Segoe UI", 12),
+        ).grid(row=1, column=0, sticky="w", padx=14, pady=(0, 8))
+        return card
+
+    def _make_labeled_entry(self, parent: ctk.CTkBaseClass, row: int, label: str, variable: tk.Variable) -> ctk.CTkEntry:
+        ctk.CTkLabel(parent, text=label, text_color="#E2E8F0", font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(
+            row=row,
+            column=0,
+            sticky="w",
+            padx=14,
+            pady=(8, 4),
+        )
+        entry = ctk.CTkEntry(parent, textvariable=variable, fg_color="#EDF2F7", text_color="#0F172A")
+        entry.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(0, 8))
+        return entry
+
+    def _make_labeled_combo(self, parent: ctk.CTkBaseClass, row: int, label: str, variable: tk.StringVar, values: list[str]) -> ctk.CTkComboBox:
+        ctk.CTkLabel(parent, text=label, text_color="#E2E8F0", font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(
+            row=row,
+            column=0,
+            sticky="w",
+            padx=14,
+            pady=(8, 4),
+        )
+        combo = ctk.CTkComboBox(parent, variable=variable, values=values, fg_color="#EDF2F7", text_color="#0F172A", button_color="#1D4ED8")
+        combo.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(0, 8))
+        return combo
+
+    def _make_action_button(
+        self,
+        parent: ctk.CTkBaseClass,
+        row: int,
+        text: str,
+        color: str,
+        hover_color: str,
+        command: Callable[[], None],
+    ) -> ctk.CTkButton:
+        button = ctk.CTkButton(parent, text=text, command=command, fg_color=color, hover_color=hover_color, height=38)
+        button.grid(row=row, column=0, sticky="ew", padx=14, pady=(0, 8))
+        return button
+
+    def _make_output_textbox(self, tab: ctk.CTkBaseClass) -> ctk.CTkTextbox:
+        tab.grid_columnconfigure(0, weight=1)
+        tab.grid_rowconfigure(0, weight=1)
+        textbox = ctk.CTkTextbox(tab, fg_color="#F8FAFC", text_color="#0F172A", border_width=1, border_color="#E2E8F0")
+        textbox.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
+        textbox.insert("1.0", "No project loaded yet.")
+        textbox.configure(state="disabled")
+        return textbox
+
+    def _on_temperature_change(self, value: float) -> None:
+        self.temperature_value_label.configure(text=f"{value:.2f}")
+        self._schedule_save()
+
+    def toggle_api_key_visibility(self) -> None:
+        show = not self.show_api_key_var.get()
+        self.show_api_key_var.set(show)
+        self.api_key_entry.configure(show="" if show else "*")
+        self.show_api_key_button.configure(text="Ocultar" if show else "Mostrar")
+        self._reset_auto_close_timer()
+
+    def _report_callback_exception(self, exc: type[BaseException], value: BaseException, traceback_obj: Any) -> None:
+        self.logger.exception("Unhandled UI exception", exc_info=(exc, value, traceback_obj))
+        self._set_status(f"Unhandled error: {value}", error=True)
+
+    def _on_configure(self, event: tk.Event) -> None:
+        if event.widget is self:
+            if self._geometry_job_id:
+                self.after_cancel(self._geometry_job_id)
+            self._geometry_job_id = self.after(700, self._save_window_geometry)
+
+    def _save_window_geometry(self) -> None:
+        if self.state() != "zoomed":
+            self.config_manager.update(
+                window_geometry=self.geometry(),
+                window_zoomed=False,
+            )
+        else:
+            self.config_manager.update(window_zoomed=True)
+
+    def _schedule_save(self) -> None:
+        if self._save_job_id:
+            self.after_cancel(self._save_job_id)
+        self._save_job_id = self.after(250, self._save_gui_state)
+
+    def _save_gui_state(self) -> None:
+        self._save_job_id = None
+        self.config_manager.update(
+            lmstudio_base_url=self.base_url_var.get().strip(),
+            model=self.model_var.get().strip(),
+            api_key=self.api_key_var.get(),
+            temperature=round(float(self.temperature_var.get()), 2),
+            scene_count=self._safe_positive_int(self.scene_count_var.get(), self.app_config.scene_count),
+            output_language=self.language_var.get().strip() or "Espanol",
+            estimated_duration_seconds=self._safe_positive_int(self.duration_var.get(), self.app_config.estimated_duration_seconds),
+            video_topic=self.topic_text.get("1.0", "end-1c").strip(),
+            visual_style=self.visual_style_var.get().strip(),
+            audience=self.audience_var.get().strip(),
+            narrative_tone=self.tone_var.get().strip(),
+            video_format=self.format_var.get().strip(),
+            generation_mode=self.mode_var.get().strip(),
+            output_dir=self.output_dir_var.get().strip() or "output",
+            auto_start_enabled=bool(self.auto_start_var.get()),
+            auto_close_enabled=bool(self.auto_close_var.get()),
+            auto_close_seconds=self._safe_positive_int(self.auto_close_seconds_var.get(), 60),
+            json_retry_attempts=self._safe_positive_int(self.retries_var.get(), 3),
+            request_timeout_seconds=self._safe_positive_int(self.timeout_var.get(), 120),
+            max_tokens=self._safe_positive_int(self.max_tokens_var.get(), 2800),
+        )
+        self.app_config = self.config_manager.config
+        self._auto_close_remaining = max(1, int(self.app_config.auto_close_seconds))
+        self._update_countdown_label()
+
+    def _safe_positive_int(self, value: str, fallback: int) -> int:
+        try:
+            parsed = int(value)
+            return parsed if parsed > 0 else fallback
+        except (TypeError, ValueError):
+            return fallback
+
+    def _build_client(self) -> LMStudioClient:
+        return LMStudioClient(
+            base_url=self.base_url_var.get().strip(),
+            api_key=self.api_key_var.get(),
+            timeout_seconds=self._safe_positive_int(self.timeout_var.get(), 120),
+        )
+
+    def _build_request(self) -> GenerationRequest:
+        topic = self.topic_text.get("1.0", "end-1c").strip()
+        if not topic:
+            raise ValueError("Enter a topic or idea before generating.")
+        return GenerationRequest(
+            topic=topic,
+            visual_style=self.visual_style_var.get().strip() or "Cinematic",
+            audience=self.audience_var.get().strip() or "General",
+            narrative_tone=self.tone_var.get().strip() or "Cinematic",
+            video_format=self.format_var.get().strip() or "YouTube Short",
+            output_language=self.language_var.get().strip() or "Espanol",
+            total_duration_seconds=self._safe_positive_int(self.duration_var.get(), 60),
+            scene_count=self._safe_positive_int(self.scene_count_var.get(), 6),
+            generation_mode=self.mode_var.get().strip() or "Proyecto completo",
+            model=self.model_var.get().strip(),
+            temperature=float(self.temperature_var.get()),
+            max_tokens=self._safe_positive_int(self.max_tokens_var.get(), 2800),
+        )
+
+    def _queue_event(self, event_type: str, **payload: Any) -> None:
+        self.task_queue.put({"type": event_type, **payload})
+
+    def _run_in_background(self, label: str, worker: Callable[[], None]) -> None:
+        if self.is_busy:
+            self._set_status("A task is already running. Please wait.", error=True)
+            return
+        self.is_busy = True
+        self._toggle_busy_state(True)
+        self._set_status(f"{label}...")
+        self.progress_bar.set(0.02)
+
+        def runner() -> None:
+            try:
+                worker()
+            except Exception as exc:
+                self.logger.exception("Background task failed: %s", exc)
+                self._queue_event("error", message=str(exc))
+            finally:
+                self._queue_event("done")
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _process_task_queue(self) -> None:
+        try:
+            while True:
+                event = self.task_queue.get_nowait()
+                event_type = event.get("type")
+                # Tk widgets must be updated on the main thread, so workers push events into this queue.
+                if event_type == "progress":
+                    self.progress_bar.set(float(event.get("value", 0)))
+                    self._set_status(str(event.get("message", "")))
+                elif event_type == "error":
+                    self.progress_bar.set(0)
+                    self._set_status(str(event.get("message", "Unknown error")), error=True)
+                elif event_type == "connection":
+                    models = event.get("models", [])
+                    message = str(event.get("message", ""))
+                    self.connection_chip.configure(text=f"LM Studio: {message}")
+                    if models:
+                        self.model_combo.configure(values=models)
+                        if not self.model_var.get().strip():
+                            self.model_var.set(models[0])
+                    self._set_status(message)
+                elif event_type == "project":
+                    self.current_project = event["project"]
+                    self.current_history_path = event.get("history_path")
+                    self._render_project(self.current_project)
+                    self._load_history_buttons()
+                    self.progress_bar.set(1)
+                    self._set_status("Project generated and saved to history.", success=True)
+                elif event_type == "video":
+                    self.progress_bar.set(1)
+                    self._set_status(f"Video generated: {event['file_path']}", success=True)
+                elif event_type == "done":
+                    self.is_busy = False
+                    self._toggle_busy_state(False)
+                    self._reset_auto_close_timer()
+                self.task_queue.task_done()
+        except queue.Empty:
+            pass
+        finally:
+            self.after(150, self._process_task_queue)
+
+    def _toggle_busy_state(self, busy: bool) -> None:
+        state = "disabled" if busy else "normal"
+        for button in [
+            self.connection_button,
+            self.generate_button,
+            self.export_json_button,
+            self.export_txt_button,
+            self.export_csv_button,
+            self.video_button,
+            self.folder_button,
+        ]:
+            button.configure(state=state)
+
+    def _set_status(self, message: str, *, success: bool = False, error: bool = False) -> None:
+        self.status_label.configure(text=message)
+        if error:
+            self.status_label.configure(text_color="#FCA5A5")
+        elif success:
+            self.status_label.configure(text_color="#86EFAC")
+        else:
+            self.status_label.configure(text_color="#E2E8F0")
+
+    def _render_project(self, project: VideoProject) -> None:
+        summary_lines = [
+            f"Title: {project.title}",
+            f"Summary: {project.summary}",
+            f"General script: {project.general_script}",
+            f"Structure: {project.structure}",
+            f"Language: {project.output_language}",
+            f"Mode: {project.generation_mode}",
+            f"Topic: {project.source_topic}",
+            f"Visual style: {project.visual_style}",
+            f"Audience: {project.audience}",
+            f"Narrative tone: {project.narrative_tone}",
+            f"Format: {project.video_format}",
+            f"Estimated duration: {project.estimated_total_duration_seconds}s",
+        ]
+        scene_blocks = []
+        for scene in project.scenes:
+            scene_blocks.append(
+                "\n".join(
+                    [
+                        f"Scene {scene.scene_number}: {scene.scene_title}",
+                        f"Description: {scene.description}",
+                        f"Visual description: {scene.visual_description or '[not requested]'}",
+                        f"Visual prompt: {scene.visual_prompt or '[not requested]'}",
+                        f"Narration: {scene.narration}",
+                        f"Duration: {scene.duration_seconds}s",
+                        f"Transition: {scene.transition}",
+                    ]
+                )
+            )
+        self._write_textbox(self.summary_text, "\n".join(summary_lines))
+        self._write_textbox(self.scenes_text, "\n\n".join(scene_blocks))
+        self._write_textbox(self.json_text, json.dumps(project.to_dict(), indent=2, ensure_ascii=False))
+        self.tab_view.set("Resumen")
+
+    def _write_textbox(self, textbox: ctk.CTkTextbox, content: str) -> None:
+        textbox.configure(state="normal")
+        textbox.delete("1.0", "end")
+        textbox.insert("1.0", content)
+        textbox.configure(state="disabled")
+
+    def _load_models_background(self) -> None:
+        def worker() -> None:
+            client = self._build_client()
+            success, models, message = client.test_connection()
+            if not success:
+                raise requests.RequestException(message)
+            self._queue_event("connection", models=models, message=message)
+
+        self._run_in_background("Testing LM Studio connection", worker)
+
+    def test_connection(self) -> None:
+        self._load_models_background()
+
+    def start_generation(self) -> None:
+        def worker() -> None:
+            self._queue_event("progress", value=0.05, message="Preparing generation request...")
+            client = self._build_client()
+            request = self._build_request()
+            if not request.model:
+                models = client.list_models()
+                if not models:
+                    raise ValueError("No model was selected and LM Studio returned no models.")
+                request.model = models[0]
+                self._queue_event("connection", models=models, message=f"Connected successfully. Using {models[0]}.")
+
+            project = self.generator_service.generate(
+                client=client,
+                request=request,
+                retry_attempts=self._safe_positive_int(self.retries_var.get(), 3),
+                progress_callback=lambda value, message: self._queue_event("progress", value=value, message=message),
+            )
+            history_path = self.history_service.save(project)
+            self._queue_event("project", project=project, history_path=history_path)
+
+        self._run_in_background("Generating project", worker)
+
+    def export_json(self) -> None:
+        if not self.current_project:
+            self._set_status("Nothing to export yet.", error=True)
+            return
+        file_path = self.export_service.export_json(self.current_project, self.config_manager.resolve_output_dir())
+        self._set_status(f"JSON exported: {file_path}", success=True)
+
+    def export_txt(self) -> None:
+        if not self.current_project:
+            self._set_status("Nothing to export yet.", error=True)
+            return
+        file_path = self.export_service.export_txt(self.current_project, self.config_manager.resolve_output_dir())
+        self._set_status(f"TXT exported: {file_path}", success=True)
+
+    def export_csv(self) -> None:
+        if not self.current_project:
+            self._set_status("Nothing to export yet.", error=True)
+            return
+        file_path = self.export_service.export_csv(self.current_project, self.config_manager.resolve_output_dir())
+        self._set_status(f"CSV exported: {file_path}", success=True)
+
+    def generate_video(self) -> None:
+        if not self.current_project:
+            self._set_status("Generate a project before creating the video.", error=True)
+            return
+
+        def worker() -> None:
+            output_dir = self.config_manager.resolve_output_dir()
+            self._queue_event("progress", value=0.2, message="Rendering storyboard frames...")
+            image_paths = self.video_service.render_storyboards(self.current_project, output_dir)
+            self._queue_event("progress", value=0.72, message="Building MP4 with FFmpeg...")
+            file_path = self.video_service.build_video(self.current_project, output_dir, image_paths=image_paths)
+            self._queue_event("video", file_path=file_path)
+
+        self._run_in_background("Generating final video", worker)
+
+    def open_output_folder(self) -> None:
+        output_path = Path(self.config_manager.resolve_output_dir())
+        output_path.mkdir(parents=True, exist_ok=True)
+        os.startfile(output_path)  # type: ignore[attr-defined]
+        self._set_status(f"Opened output folder: {output_path}")
+
+    def choose_output_folder(self) -> None:
+        selected = filedialog.askdirectory(initialdir=self.config_manager.resolve_output_dir())
+        if selected:
+            self.output_dir_var.set(selected)
+            self._save_gui_state()
+            self._set_status(f"Output folder updated: {selected}", success=True)
+
+    def _load_history_buttons(self) -> None:
+        for child in self.history_scroll.winfo_children():
+            child.destroy()
+
+        entries = self.history_service.list_entries(limit=self.app_config.history_limit)
+        if not entries:
+            ctk.CTkLabel(
+                self.history_scroll,
+                text="No saved projects yet.",
+                text_color="#475569",
+            ).grid(row=0, column=0, sticky="w", padx=12, pady=12)
+            return
+
+        for index, entry in enumerate(entries):
+            button = ctk.CTkButton(
+                self.history_scroll,
+                text=entry.file_path.stem,
+                anchor="w",
+                fg_color="#E2E8F0",
+                text_color="#0F172A",
+                hover_color="#CBD5E1",
+                command=lambda item=entry: self.load_history_entry(item),
+            )
+            button.grid(row=index, column=0, sticky="ew", padx=10, pady=(8 if index == 0 else 0, 8))
+
+    def load_history_entry(self, entry: HistoryEntry) -> None:
+        try:
+            project = self.history_service.load(entry.file_path)
+        except Exception as exc:
+            self._set_status(f"Failed to load history entry: {exc}", error=True)
+            return
+        self.current_project = project
+        self.current_history_path = entry.file_path
+        self.topic_text.delete("1.0", "end")
+        self.topic_text.insert("1.0", project.source_topic)
+        self.visual_style_var.set(project.visual_style)
+        self.audience_var.set(project.audience)
+        self.tone_var.set(project.narrative_tone)
+        self.format_var.set(project.video_format)
+        self.language_var.set(project.output_language)
+        self.mode_var.set(project.generation_mode)
+        self.duration_var.set(str(project.estimated_total_duration_seconds))
+        self.scene_count_var.set(str(len(project.scenes)))
+        self._schedule_save()
+        self._render_project(project)
+        self._set_status(f"Loaded history project: {entry.file_path.name}", success=True)
+
+    def show_about_dialog(self) -> None:
+        dialog = ctk.CTkToplevel(self)
+        dialog.title("About")
+        dialog.geometry("500x190")
+        dialog.resizable(False, False)
+        dialog.configure(fg_color="#0F172A")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        year = datetime.now().year
+        text = f"{DISPLAY_VERSION} creado por Synyster Rick, {year} Derechos Reservados"
+        ctk.CTkLabel(
+            dialog,
+            text=APP_NAME,
+            text_color="#F8FAFC",
+            font=ctk.CTkFont("Segoe UI Variable Display", 28, weight="bold"),
+        ).pack(pady=(26, 8))
+        ctk.CTkLabel(
+            dialog,
+            text=text,
+            text_color="#CBD5E1",
+            font=ctk.CTkFont("Segoe UI", 15),
+            wraplength=420,
+            justify="center",
+        ).pack(padx=18, pady=(0, 16))
+        ctk.CTkButton(
+            dialog,
+            text="Cerrar",
+            command=dialog.destroy,
+            fg_color="#EA580C",
+            hover_color="#C2410C",
+            width=120,
+        ).pack()
+
+    def reset_form(self) -> None:
+        self.topic_text.delete("1.0", "end")
+        self.visual_style_var.set("Cyberpunk cinematografico")
+        self.audience_var.set("General")
+        self.tone_var.set("Cinematic and immersive")
+        self.format_var.set("YouTube Short")
+        self.mode_var.set("Proyecto completo")
+        self.language_var.set("Espanol")
+        self.scene_count_var.set("6")
+        self.duration_var.set("60")
+        self._schedule_save()
+        self._set_status("Project form reset.")
+
+    def _reset_auto_close_timer(self) -> None:
+        self._auto_close_remaining = max(1, self._safe_positive_int(self.auto_close_seconds_var.get(), 60))
+        self._update_countdown_label()
+
+    def _update_countdown_label(self) -> None:
+        if not self.auto_close_var.get():
+            self.countdown_label.configure(text=f"{DISPLAY_VERSION} | Auto-close off")
+            return
+        if self.is_busy:
+            self.countdown_label.configure(text=f"{DISPLAY_VERSION} | Auto-close paused while processing")
+            return
+        self.countdown_label.configure(text=f"{DISPLAY_VERSION} | Auto-close in {self._auto_close_remaining}s")
+
+    def _tick_auto_close(self) -> None:
+        if self.auto_close_var.get() and not self.is_busy:
+            self._auto_close_remaining -= 1
+            if self._auto_close_remaining <= 0:
+                self._set_status("Auto-close timer reached zero. Closing application.")
+                self.after(150, self._on_close)
+                return
+        self._update_countdown_label()
+        self._countdown_job_id = self.after(1000, self._tick_auto_close)
+
+    def _on_close(self) -> None:
+        self._save_gui_state()
+        self._save_window_geometry()
+        self.destroy()
+
+
+def run() -> None:
+    app = VideoGeniusApp()
+    app.mainloop()
