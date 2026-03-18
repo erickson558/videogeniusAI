@@ -17,6 +17,11 @@ VideoGeniusAI is a desktop app in Python for turning an idea into a structured v
 - Export to JSON, TXT and CSV
 - Local storyboard frame rendering
 - Optional MP4 assembly with FFmpeg
+- Guided local setup for LM Studio, ComfyUI Desktop, and FFmpeg
+- Shared ComfyUI models folder plus automatic `extra_models_config.yaml` wiring
+- One-click installation of a recommended base ComfyUI checkpoint
+- Optional local AI rendering through ComfyUI plus built-in Windows narration or optional Piper narration
+- Simplified quick flow with a single end-to-end `Generar video completo` action
 - Persistent `config.json`, window position memory and auto-save
 - `log.txt` logging with timestamps
 - Version visible in the UI
@@ -39,7 +44,10 @@ videogeniusAI/
 |   |-- logging_utils.py
 |   |-- models.py
 |   |-- paths.py
+|   |-- setup_manager.py
+|   |-- tts_service.py
 |   |-- version.py
+|   |-- video_render_service.py
 |   `-- video_service.py
 `-- tests/
 ```
@@ -49,7 +57,9 @@ videogeniusAI/
 - Windows
 - Python 3.12+
 - LM Studio running locally with an OpenAI-compatible server enabled
-- FFmpeg in `PATH` if you want MP4 output
+- The app can now prepare LM Studio, ComfyUI Desktop and FFmpeg automatically on Windows through the guided setup card
+- ComfyUI running locally if you want local AI-generated scene visuals
+- Piper installed locally only if you explicitly choose `Piper local`
 
 ## Dependencies
 
@@ -74,6 +84,31 @@ Double-click `videogeniusAI.pyw` or run:
 ```powershell
 pythonw .\videogeniusAI.pyw
 ```
+
+## User manual
+
+Detailed usage instructions are available in [MANUAL_USUARIO.md](MANUAL_USUARIO.md).
+
+## Video backends
+
+The app now supports two final video backends:
+
+- `Storyboard local`: create PNG storyboard frames and assemble them into an MP4 locally with FFmpeg.
+- `Local AI video`: generate a local scene asset through ComfyUI for each scene, synthesize narration with `Windows local` by default or `Piper local` optionally, and assemble the final MP4 with FFmpeg. The guided setup now probes common local ComfyUI ports automatically, including Desktop defaults.
+
+Recommended workflow:
+
+1. Generate the structured project with LM Studio.
+2. Review the scenes.
+3. Choose the render backend.
+4. Click `Generar video final`.
+
+Quick workflow:
+
+1. Write the prompt.
+2. Click `Preparar entorno automatico` once.
+3. Choose the essentials in `Quick setup`.
+4. Click `Generar video completo`.
 
 ## Build EXE
 

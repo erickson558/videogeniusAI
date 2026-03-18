@@ -1,13 +1,35 @@
 from __future__ import annotations
 
 import json
+import re
 import threading
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from .paths import CONFIG_PATH, HISTORY_DIR, OUTPUT_DIR, TEMP_DIR
+from .paths import CONFIG_PATH, HISTORY_DIR, OUTPUT_DIR, RUNTIME_DIR, TEMP_DIR, WORKFLOWS_DIR
 from .version import DISPLAY_VERSION
+
+DEFAULT_WINDOW_GEOMETRY = "1460x900+80+40"
+MIN_WINDOW_WIDTH = 1320
+MIN_WINDOW_HEIGHT = 840
+
+
+def sanitize_window_geometry(value: str, fallback: str = DEFAULT_WINDOW_GEOMETRY) -> str:
+    text = (value or "").strip()
+    match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", text)
+    if not match:
+        return fallback
+
+    width = int(match.group(1))
+    height = int(match.group(2))
+    x_pos = int(match.group(3))
+    y_pos = int(match.group(4))
+    if width < MIN_WINDOW_WIDTH or height < MIN_WINDOW_HEIGHT:
+        return fallback
+    if abs(x_pos) > 10000 or abs(y_pos) > 10000:
+        return fallback
+    return f"{width}x{height}{x_pos:+d}{y_pos:+d}"
 
 
 @dataclass
@@ -17,6 +39,19 @@ class AppConfig:
     lmstudio_base_url: str = "http://127.0.0.1:1234"
     model: str = ""
     api_key: str = ""
+    video_provider: str = "Storyboard local"
+    video_aspect_ratio: str = "9:16"
+    render_captions: bool = True
+    comfyui_base_url: str = "http://127.0.0.1:8188"
+    comfyui_checkpoint: str = ""
+    comfyui_workflow_path: str = ""
+    comfyui_negative_prompt: str = ""
+    comfyui_poll_interval_seconds: int = 2
+    tts_backend: str = "Windows local"
+    ffmpeg_path: str = ""
+    piper_executable_path: str = ""
+    piper_model_path: str = ""
+    setup_completed: bool = False
     temperature: float = 0.7
     scene_count: int = 6
     output_language: str = "Espanol"
@@ -31,7 +66,7 @@ class AppConfig:
     auto_start_enabled: bool = False
     auto_close_enabled: bool = False
     auto_close_seconds: int = 60
-    window_geometry: str = "1460x900+80+40"
+    window_geometry: str = DEFAULT_WINDOW_GEOMETRY
     window_zoomed: bool = False
     history_limit: int = 100
     json_retry_attempts: int = 3
@@ -50,6 +85,8 @@ class ConfigManager:
         HISTORY_DIR.mkdir(parents=True, exist_ok=True)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
+        RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        WORKFLOWS_DIR.mkdir(parents=True, exist_ok=True)
         Path(self.resolve_output_dir()).mkdir(parents=True, exist_ok=True)
 
     def _load(self) -> AppConfig:
@@ -69,6 +106,7 @@ class ConfigManager:
         payload = asdict(AppConfig())
         payload.update(raw if isinstance(raw, dict) else {})
         payload["app_version"] = DISPLAY_VERSION
+        payload["window_geometry"] = sanitize_window_geometry(str(payload.get("window_geometry", DEFAULT_WINDOW_GEOMETRY)))
         return AppConfig(**payload)
 
     def _write(self, config: AppConfig | None = None) -> None:

@@ -11,4 +11,6 @@ dist/
 history/
 output/
 temp/
+runtime/
+workflows/
 videogeniusAI.exe

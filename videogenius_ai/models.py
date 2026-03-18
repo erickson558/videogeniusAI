@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+from pathlib import Path
 from typing import Any
 
 
@@ -64,3 +65,38 @@ class VideoProject:
         body = {key: value for key, value in payload.items() if key != "scenes"}
         body["scenes"] = scenes
         return cls(**body)
+
+
+@dataclass
+class VideoRenderRequest:
+    project: VideoProject
+    output_dir: str
+    provider: str = "Storyboard local"
+    aspect_ratio: str = "9:16"
+    request_timeout_seconds: int = 180
+    render_captions: bool = True
+    comfyui_base_url: str = "http://127.0.0.1:8188"
+    comfyui_checkpoint: str = ""
+    comfyui_workflow_path: str = ""
+    comfyui_negative_prompt: str = ""
+    comfyui_poll_interval_seconds: int = 2
+    tts_backend: str = "Windows local"
+    ffmpeg_path: str = ""
+    piper_executable_path: str = ""
+    piper_model_path: str = ""
+
+
+@dataclass
+class RenderedVideoResult:
+    provider: str
+    file_path: Path | None = None
+    remote_video_id: str = ""
+    remote_video_url: str = ""
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class GeneratedSceneAsset:
+    asset_type: str
+    file_path: Path
+    source_payload: dict[str, Any] = field(default_factory=dict)

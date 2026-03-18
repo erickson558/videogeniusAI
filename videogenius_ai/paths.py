@@ -16,4 +16,5 @@ LOG_PATH = APP_ROOT / "log.txt"
 HISTORY_DIR = APP_ROOT / "history"
 OUTPUT_DIR = APP_ROOT / "output"
 TEMP_DIR = APP_ROOT / "temp"
-
+RUNTIME_DIR = APP_ROOT / "runtime"
+WORKFLOWS_DIR = APP_ROOT / "workflows"

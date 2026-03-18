@@ -77,8 +77,14 @@ class StoryboardVideoService:
             lines.append(f"file '{image_paths[-1].as_posix()}'")
         manifest_path.write_text("\n".join(lines), encoding="utf-8")
 
-    def build_video(self, project: VideoProject, output_dir: str | Path, image_paths: list[Path] | None = None) -> Path:
-        ffmpeg_path = which("ffmpeg")
+    def build_video(
+        self,
+        project: VideoProject,
+        output_dir: str | Path,
+        image_paths: list[Path] | None = None,
+        ffmpeg_path: str = "",
+    ) -> Path:
+        ffmpeg_path = ffmpeg_path.strip() if ffmpeg_path.strip() and Path(ffmpeg_path).exists() else (which("ffmpeg") or which("ffmpeg.exe"))
         if not ffmpeg_path:
             raise FileNotFoundError("FFmpeg is not available in PATH.")
 

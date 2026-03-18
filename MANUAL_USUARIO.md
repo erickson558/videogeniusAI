@@ -1,0 +1,312 @@
+# Manual de Usuario
+
+## VideoGeniusAI
+
+Version actual: `V0.0.9`
+
+VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para escribir el proyecto de video y puede producir el MP4 final de dos formas:
+
+- `Storyboard local`
+- `Local AI video` con `ComfyUI + FFmpeg`, voz `Windows local` por defecto y `Piper` opcional
+
+La GUI ahora tiene un flujo rapido llamado `Quick setup` para que escribas el prompt y generes el video completo con un solo boton, y un bloque `Instalacion guiada` para preparar el entorno automaticamente.
+
+## 1. Requisitos antes de usar la app
+
+Necesitas:
+
+- Windows
+- LM Studio instalado o dejar que la app lo instale
+- Un modelo cargado en LM Studio
+- El servidor local de LM Studio encendido
+- FFmpeg instalado o dejar que la app lo instale
+
+Opcional para modo `Local AI video`:
+
+- ComfyUI corriendo localmente
+- Un modelo visual cargado en ComfyUI
+- Piper instalado si quieres narracion local avanzada
+- Un modelo `.onnx` de Piper si quieres narracion local
+
+Prueba rapida para FFmpeg:
+
+```powershell
+ffmpeg -version
+```
+
+## 2. Que hace la app
+
+La app trabaja en dos etapas:
+
+### Etapa 1: Generacion del proyecto
+
+LM Studio genera:
+
+- titulo
+- resumen
+- guion general
+- estructura
+- escenas
+- descripcion por escena
+- prompt visual por escena
+- narracion por escena
+- duracion por escena
+- transicion
+
+### Etapa 2: Video final
+
+Existen dos modos:
+
+#### Storyboard local
+
+- crea una imagen `.png` por escena
+- usa FFmpeg para unirlas
+- produce un `.mp4`
+- sirve como previsualizacion rapida
+
+#### Local AI video
+
+- usa ComfyUI para generar una imagen o clip local por escena
+- usa Piper para narracion si lo configuras
+- quema subtitulos locales si activas captions
+- usa FFmpeg para ensamblar el MP4 final
+
+## 3. Flujo correcto de uso
+
+### Flujo mas simple
+
+1. Escribe el prompt en `Project brief`.
+2. En `Quick setup` elige:
+   - estilo visual
+   - tono
+   - formato
+   - duracion
+   - backend de video
+3. Pulsa `Generar video completo`.
+
+Si el backend es `Storyboard local`, la app genera el proyecto y luego el MP4 en una sola corrida.
+
+Si el backend es `Local AI video`, la app genera el proyecto, llama a ComfyUI y luego arma el MP4 final.
+
+### Paso 1: Abrir LM Studio
+
+1. Abre `LM Studio`.
+2. Carga un modelo.
+3. Ve a `Developer > Local Server`.
+4. Enciende el switch del servidor.
+5. Verifica que el puerto sea `1234`.
+
+### Paso 2: Abrir VideoGeniusAI y preparar el entorno
+
+1. Abre `videogeniusAI.exe` o `videogeniusAI.pyw`.
+2. En `Instalacion guiada` pulsa `Analizar entorno`.
+3. Si faltan componentes, pulsa `Preparar entorno automatico`.
+4. La app ahora puede:
+   - configurar una carpeta compartida de modelos para ComfyUI
+   - crear `extra_models_config.yaml`
+   - descargar un checkpoint base recomendado
+   - crear el workflow inicial por ti
+5. Si ComfyUI ya estaba abierto cuando se descargo el checkpoint, reinicialo para que lo detecte.
+
+### Paso 3: Conectar LM Studio
+
+1. En `Base URL` usa:
+
+```text
+http://127.0.0.1:1234
+```
+
+3. Pulsa `Probar conexion`.
+
+### Paso 4: Llenar el formulario
+
+Completa:
+
+- `Project brief`
+- `Visual style`
+- `Audience`
+- `Narrative tone`
+- `Video format`
+- `Model`
+- `Temperature`
+- `Scene count`
+- `Output language`
+- `Estimated duration (s)`
+- `Output folder`
+
+Recomendacion:
+
+- usa `Proyecto completo` si luego quieres producir el MP4
+
+### Paso 5: Generar el proyecto
+
+1. Pulsa `Generar guion`.
+2. Espera a que termine.
+3. Revisa las pestañas:
+   - `Resumen`
+   - `Escenas`
+   - `JSON`
+
+## 4. Como generar video sin usar HeyGen
+
+### Opcion A: Storyboard local
+
+1. En `Render backend` elige `Storyboard local`.
+2. Pulsa `Generar video final`.
+3. Abre la carpeta de salida.
+
+### Opcion B: Local AI video
+
+1. En `Render backend` elige `Local AI video`.
+2. En `ComfyUI base URL` usa normalmente:
+
+```text
+http://127.0.0.1:8000
+```
+
+Si usas ComfyUI no Desktop o una instalacion manual, puede seguir siendo:
+
+```text
+http://127.0.0.1:8188
+```
+
+3. Pulsa `Preparar entorno automatico`.
+4. La app intentara:
+   - detectar el modelo visual de ComfyUI
+   - configurar la carpeta compartida de modelos
+   - descargar el modelo base recomendado si aun no existe
+   - crear el workflow inicial
+   - activar `Windows local` para la narracion
+   - detectar FFmpeg
+5. Si quieres evitar basura visual, llena `Negative prompt`.
+6. Si quieres narracion local avanzada:
+   - en `TTS backend` elige `Piper local`
+   - llena `Piper executable`
+   - llena `Piper model`
+7. Pulsa `Probar ComfyUI`.
+8. Pulsa `Generar video final`.
+
+## 5. Workflow de ComfyUI
+
+En la mayoria de los casos ya no necesitas crear el workflow manualmente.
+
+Si `Preparar entorno automatico` detecta un modelo visual, la app crea el archivo por ti en la carpeta `workflows`.
+
+Solo necesitas un workflow manual si quieres usar uno personalizado.
+
+La app espera un workflow JSON exportado para API.
+
+Dentro del workflow puedes usar estos placeholders:
+
+- `__PROMPT__`
+- `__NEGATIVE_PROMPT__`
+- `__SEED__`
+- `__OUTPUT_PREFIX__`
+
+La app reemplaza esos valores automaticamente por cada escena.
+
+Ejemplo:
+
+- el nodo de prompt positivo puede contener `__PROMPT__`
+- el nodo negativo puede contener `__NEGATIVE_PROMPT__`
+- el nodo seed puede contener `__SEED__`
+- el nodo de prefijo de salida puede contener `__OUTPUT_PREFIX__`
+
+## 6. Que archivos se crean
+
+En storyboard local veras algo como:
+
+```text
+20260318_150000_mi_video_storyboard/
+  scene_01.png
+  scene_02.png
+
+20260318_150000_mi_video.mp4
+mi_video_manifest.txt
+```
+
+En `Local AI video` veras algo como:
+
+```text
+20260318_150000_mi_video_local_ai/
+  assets/
+  audio/
+  subtitles/
+  clips/
+  concat_manifest.txt
+
+20260318_150000_mi_video_local_ai.mp4
+```
+
+## 7. Errores comunes y solucion
+
+### Error: no conecta con LM Studio
+
+Solucion:
+
+1. Abre LM Studio
+2. Ve a `Developer > Local Server`
+3. Activa el servidor
+4. Vuelve a pulsar `Probar conexion`
+
+### Error: no conecta con ComfyUI
+
+Solucion:
+
+1. Verifica que ComfyUI este abierto
+2. Revisa `ComfyUI base URL`
+3. Pulsa `Abrir ComfyUI` o `Probar ComfyUI`
+4. Luego pulsa `Preparar entorno automatico`
+
+### Error: no genera el MP4
+
+Solucion:
+
+```powershell
+ffmpeg -version
+```
+
+Si falla, instala FFmpeg y vuelve a intentar.
+
+### Error: no hay voz o falla Piper
+
+La opcion recomendada es `Windows local`, porque no requiere instalar nada extra.
+
+Si decides usar Piper:
+
+Causas comunes:
+
+- `Piper executable` incorrecto
+- `Piper model` incorrecto
+- no elegiste `Piper local`
+
+## 8. Atajos utiles
+
+- `Ctrl+L`: probar conexion LM Studio
+- `Ctrl+I`: analizar entorno
+- `Ctrl+Shift+I`: preparar entorno automaticamente
+- `Ctrl+H`: probar ComfyUI
+- `Ctrl+G`: generar guion
+- `Ctrl+Shift+G`: generar video completo
+- `Ctrl+J`: exportar JSON
+- `Ctrl+T`: exportar TXT
+- `Ctrl+E`: exportar CSV
+- `Ctrl+M`: generar video final
+- `Ctrl+O`: abrir carpeta de salida
+- `Ctrl+Q`: salir
+- `Ctrl+Shift+D`: alternar oscuro/claro
+- `F1`: About
+
+## 9. Resumen corto
+
+Si quieres solo la receta practica:
+
+1. Enciende LM Studio
+2. Abre la app
+3. Pulsa `Preparar entorno automatico`
+4. Genera el proyecto
+5. Si quieres video local real, abre ComfyUI
+6. Pulsa `Probar ComfyUI`
+7. Pulsa `Generar video final`
+8. Abre la carpeta de salida
+9. Usa el `.mp4`

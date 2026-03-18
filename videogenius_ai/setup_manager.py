@@ -1,0 +1,554 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+from dataclasses import dataclass, field
+from pathlib import Path
+from shutil import which
+from typing import Callable
+
+import requests
+
+from .comfyui_client import ComfyUIClient
+from .config import AppConfig
+from .paths import APP_ROOT, RUNTIME_DIR, WORKFLOWS_DIR
+
+CREATE_NO_WINDOW = 0x08000000
+
+LM_STUDIO_PACKAGE_ID = "ElementLabs.LMStudio"
+COMFYUI_PACKAGE_ID = "Comfy.ComfyUI-Desktop"
+FFMPEG_PACKAGE_ID = "Gyan.FFmpeg.Essentials"
+
+PACKAGE_LABELS = {
+    LM_STUDIO_PACKAGE_ID: "LM Studio",
+    COMFYUI_PACKAGE_ID: "ComfyUI Desktop",
+    FFMPEG_PACKAGE_ID: "FFmpeg",
+}
+
+DEFAULT_NEGATIVE_PROMPT = "low quality, blurry, distorted, watermark, logo, extra fingers, deformed face, bad anatomy"
+DEFAULT_CHECKPOINT_FILENAME = "v1-5-pruned-emaonly-fp16.safetensors"
+DEFAULT_CHECKPOINT_URL = "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/v1-5-pruned-emaonly-fp16.safetensors"
+MIN_VALID_CHECKPOINT_BYTES = 512 * 1024 * 1024
+MANAGED_SECTION_BEGIN = "# VideoGeniusAI managed models begin"
+MANAGED_SECTION_END = "# VideoGeniusAI managed models end"
+
+ProgressCallback = Callable[[float, str], None]
+
+
+@dataclass
+class SetupStatus:
+    winget_available: bool
+    lmstudio_installed: bool
+    comfyui_installed: bool
+    ffmpeg_ready: bool
+    comfyui_reachable: bool
+    workflow_ready: bool
+    windows_tts_ready: bool
+    ffmpeg_path: str = ""
+    comfyui_checkpoint: str = ""
+    comfyui_base_url: str = ""
+    model_folder: str = ""
+    checkpoints: list[str] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    def summary_lines(self) -> list[str]:
+        lines = [
+            f"LM Studio: {'Listo' if self.lmstudio_installed else 'Pendiente'}",
+            f"ComfyUI Desktop: {'Listo' if self.comfyui_installed else 'Pendiente'}",
+            f"FFmpeg: {'Listo' if self.ffmpeg_ready else 'Pendiente'}",
+            f"ComfyUI API: {'Conectado' if self.comfyui_reachable else 'Sin conexion'}",
+            f"Workflow automatico: {'Listo' if self.workflow_ready else 'Pendiente'}",
+            f"Voz local de Windows: {'Disponible' if self.windows_tts_ready else 'No disponible'}",
+        ]
+        if self.comfyui_checkpoint:
+            lines.append(f"Modelo visual: {self.comfyui_checkpoint}")
+        if self.comfyui_base_url:
+            lines.append(f"ComfyUI URL: {self.comfyui_base_url}")
+        if self.model_folder:
+            lines.append(f"Modelos compartidos: {self.model_folder}")
+        if self.notes:
+            lines.extend(self.notes)
+        return lines
+
+
+@dataclass
+class SetupPreparationResult:
+    updates: dict[str, object]
+    status: SetupStatus
+
+
+class SetupManager:
+    def __init__(self) -> None:
+        self.workflows_dir = WORKFLOWS_DIR
+        self.workflows_dir.mkdir(parents=True, exist_ok=True)
+        self.runtime_models_dir = RUNTIME_DIR / "comfyui_models"
+        self.runtime_models_dir.mkdir(parents=True, exist_ok=True)
+
+    def _candidate_comfyui_urls(self, configured_url: str) -> list[str]:
+        candidates = [configured_url.strip(), "http://127.0.0.1:8000", "http://127.0.0.1:8188"]
+        seen: set[str] = set()
+        normalized: list[str] = []
+        for item in candidates:
+            value = item.strip().rstrip("/")
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            normalized.append(value)
+        return normalized
+
+    def _run(self, command: list[str], *, check: bool = True) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            command,
+            check=check,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            creationflags=CREATE_NO_WINDOW,
+        )
+
+    def winget_available(self) -> bool:
+        return which("winget") is not None
+
+    def _package_installed(self, package_id: str) -> bool:
+        if not self.winget_available():
+            return False
+        result = self._run(
+            [
+                "winget",
+                "list",
+                "--id",
+                package_id,
+                "--exact",
+                "--source",
+                "winget",
+                "--accept-source-agreements",
+                "--disable-interactivity",
+            ],
+            check=False,
+        )
+        output = f"{result.stdout}\n{result.stderr}".lower()
+        return package_id.lower() in output
+
+    def install_package(self, package_id: str) -> str:
+        if not self.winget_available():
+            raise FileNotFoundError("winget is not available on this Windows installation.")
+        result = self._run(
+            [
+                "winget",
+                "install",
+                "--id",
+                package_id,
+                "--exact",
+                "--source",
+                "winget",
+                "--accept-source-agreements",
+                "--accept-package-agreements",
+                "--disable-interactivity",
+                "--silent",
+            ]
+        )
+        return (result.stdout or result.stderr or PACKAGE_LABELS.get(package_id, package_id)).strip()
+
+    def _search_for_executable(self, filename: str, roots: list[Path]) -> str:
+        for root in roots:
+            if not root.exists():
+                continue
+            try:
+                for match in root.rglob(filename):
+                    if match.is_file():
+                        return str(match.resolve())
+            except OSError:
+                continue
+        return ""
+
+    def _common_program_roots(self) -> list[Path]:
+        candidates = [
+            APP_ROOT,
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Programs",
+            Path(os.environ.get("LOCALAPPDATA", "")) / "Microsoft" / "WinGet" / "Packages",
+            Path(os.environ.get("ProgramFiles", "")),
+            Path(os.environ.get("ProgramFiles(x86)", "")),
+        ]
+        return [path for path in candidates if str(path).strip()]
+
+    def resolve_ffmpeg_path(self, configured_path: str = "") -> str:
+        candidate = configured_path.strip()
+        if candidate and Path(candidate).exists():
+            return str(Path(candidate).resolve())
+        located = which("ffmpeg") or which("ffmpeg.exe")
+        if located:
+            return located
+        return self._search_for_executable("ffmpeg.exe", self._common_program_roots())
+
+    def resolve_ffprobe_path(self, ffmpeg_path: str = "") -> str:
+        ffmpeg_executable = self.resolve_ffmpeg_path(ffmpeg_path)
+        if ffmpeg_executable:
+            sibling = Path(ffmpeg_executable).with_name("ffprobe.exe")
+            if sibling.exists():
+                return str(sibling.resolve())
+        located = which("ffprobe") or which("ffprobe.exe")
+        if located:
+            return located
+        return self._search_for_executable("ffprobe.exe", self._common_program_roots())
+
+    def find_application_path(self, app_name: str) -> str:
+        lookup = {
+            "lmstudio": ["LM Studio.exe", "LMStudio.exe"],
+            "comfyui": ["ComfyUI.exe", "ComfyUI Desktop.exe"],
+        }
+        targets = lookup.get(app_name.lower(), [])
+        for filename in targets:
+            match = self._search_for_executable(filename, self._common_program_roots())
+            if match:
+                return match
+        return ""
+
+    def launch_application(self, app_name: str) -> bool:
+        executable = self.find_application_path(app_name)
+        if not executable:
+            return False
+        os.startfile(executable)  # type: ignore[attr-defined]
+        return True
+
+    def _workflow_dimensions(self, aspect_ratio: str) -> tuple[int, int]:
+        mapping = {
+            "9:16": (768, 1344),
+            "16:9": (1344, 768),
+            "1:1": (1024, 1024),
+        }
+        return mapping.get(aspect_ratio, mapping["9:16"])
+
+    def managed_checkpoints_dir(self) -> Path:
+        path = self.runtime_models_dir / "checkpoints"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def comfyui_user_config_dir(self) -> Path:
+        appdata = Path(os.environ.get("APPDATA", "")).expanduser()
+        path = appdata / "ComfyUI"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def extra_models_config_path(self) -> Path:
+        return self.comfyui_user_config_dir() / "extra_models_config.yaml"
+
+    def ensure_extra_models_config(self) -> Path:
+        target = self.extra_models_config_path()
+        managed_root = self.runtime_models_dir.resolve().as_posix()
+        managed_block = "\n".join(
+            [
+                MANAGED_SECTION_BEGIN,
+                "videogeniusai:",
+                f"  base_path: {managed_root}",
+                "  checkpoints: checkpoints",
+                MANAGED_SECTION_END,
+            ]
+        )
+
+        if target.exists():
+            current = target.read_text(encoding="utf-8")
+        else:
+            current = ""
+
+        if MANAGED_SECTION_BEGIN in current and MANAGED_SECTION_END in current:
+            before, _sep, remainder = current.partition(MANAGED_SECTION_BEGIN)
+            _managed, _sep2, after = remainder.partition(MANAGED_SECTION_END)
+            updated = (before.rstrip() + "\n" + managed_block + "\n" + after.lstrip()).strip() + "\n"
+        elif current.strip():
+            updated = current.rstrip() + "\n\n" + managed_block + "\n"
+        else:
+            updated = managed_block + "\n"
+
+        target.write_text(updated, encoding="utf-8")
+        return target
+
+    def local_checkpoints(self) -> list[str]:
+        names = []
+        for suffix in ("*.safetensors", "*.ckpt", "*.pt"):
+            for path in sorted(self.managed_checkpoints_dir().glob(suffix)):
+                if path.is_file():
+                    names.append(path.name)
+        return names
+
+    def default_checkpoint_path(self) -> Path:
+        return self.managed_checkpoints_dir() / DEFAULT_CHECKPOINT_FILENAME
+
+    def open_models_folder(self) -> Path:
+        target = self.managed_checkpoints_dir()
+        os.startfile(target)  # type: ignore[attr-defined]
+        return target
+
+    def download_default_checkpoint(self, progress_callback: ProgressCallback | None = None) -> Path:
+        destination = self.default_checkpoint_path()
+        if destination.exists() and destination.stat().st_size >= MIN_VALID_CHECKPOINT_BYTES:
+            if progress_callback:
+                progress_callback(1.0, "El modelo base ya estaba descargado.")
+            return destination
+
+        temp_path = destination.with_suffix(".download")
+        if temp_path.exists():
+            temp_path.unlink()
+
+        with requests.get(DEFAULT_CHECKPOINT_URL, stream=True, timeout=60) as response:
+            response.raise_for_status()
+            total = int(response.headers.get("Content-Length", "0") or "0")
+            written = 0
+            with temp_path.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    written += len(chunk)
+                    if progress_callback and total > 0:
+                        ratio = min(1.0, written / total)
+                        progress_callback(ratio, f"Descargando modelo base {ratio * 100:.0f}%...")
+
+        if temp_path.stat().st_size < MIN_VALID_CHECKPOINT_BYTES:
+            temp_path.unlink(missing_ok=True)
+            raise ValueError("La descarga del modelo base parece incompleta o invalida.")
+
+        temp_path.replace(destination)
+        if progress_callback:
+            progress_callback(1.0, "Modelo base descargado correctamente.")
+        return destination
+
+    def build_default_workflow_payload(self, *, checkpoint_name: str, aspect_ratio: str) -> dict[str, object]:
+        width, height = self._workflow_dimensions(aspect_ratio)
+        return {
+            "3": {
+                "inputs": {
+                    "seed": "__SEED__",
+                    "steps": 24,
+                    "cfg": 7.0,
+                    "sampler_name": "euler",
+                    "scheduler": "normal",
+                    "denoise": 1,
+                    "model": ["4", 0],
+                    "positive": ["6", 0],
+                    "negative": ["7", 0],
+                    "latent_image": ["5", 0],
+                },
+                "class_type": "KSampler",
+            },
+            "4": {
+                "inputs": {
+                    "ckpt_name": checkpoint_name,
+                },
+                "class_type": "CheckpointLoaderSimple",
+            },
+            "5": {
+                "inputs": {
+                    "width": width,
+                    "height": height,
+                    "batch_size": 1,
+                },
+                "class_type": "EmptyLatentImage",
+            },
+            "6": {
+                "inputs": {
+                    "text": "__PROMPT__",
+                    "clip": ["4", 1],
+                },
+                "class_type": "CLIPTextEncode",
+            },
+            "7": {
+                "inputs": {
+                    "text": "__NEGATIVE_PROMPT__",
+                    "clip": ["4", 1],
+                },
+                "class_type": "CLIPTextEncode",
+            },
+            "8": {
+                "inputs": {
+                    "samples": ["3", 0],
+                    "vae": ["4", 2],
+                },
+                "class_type": "VAEDecode",
+            },
+            "9": {
+                "inputs": {
+                    "filename_prefix": "__OUTPUT_PREFIX__",
+                    "images": ["8", 0],
+                },
+                "class_type": "SaveImage",
+            },
+        }
+
+    def ensure_default_workflow(self, *, checkpoint_name: str, aspect_ratio: str) -> Path:
+        if not checkpoint_name.strip():
+            raise ValueError("A ComfyUI checkpoint is required to create the automatic workflow.")
+        workflow_path = self.workflows_dir / "default_local_ai_workflow.json"
+        payload = self.build_default_workflow_payload(checkpoint_name=checkpoint_name.strip(), aspect_ratio=aspect_ratio)
+        workflow_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        return workflow_path
+
+    def _load_checkpoints(self, base_url: str) -> list[str]:
+        if not base_url.strip():
+            return []
+        try:
+            client = ComfyUIClient(base_url=base_url)
+            return client.list_checkpoints()
+        except Exception:
+            return []
+
+    def _comfyui_reachable(self, base_url: str) -> bool:
+        if not base_url.strip():
+            return False
+        try:
+            client = ComfyUIClient(base_url=base_url)
+            success, _message = client.test_connection()
+            return success
+        except Exception:
+            return False
+
+    def resolve_comfyui_base_url(self, configured_url: str) -> str:
+        for candidate in self._candidate_comfyui_urls(configured_url):
+            if self._comfyui_reachable(candidate):
+                return candidate
+        return configured_url.strip()
+
+    def inspect_environment(self, config: AppConfig) -> SetupStatus:
+        notes: list[str] = []
+        self.ensure_extra_models_config()
+        ffmpeg_path = self.resolve_ffmpeg_path(config.ffmpeg_path)
+        workflow_ready = Path(config.comfyui_workflow_path).exists() if config.comfyui_workflow_path.strip() else False
+        resolved_comfyui_url = self.resolve_comfyui_base_url(config.comfyui_base_url)
+        checkpoints = self._load_checkpoints(resolved_comfyui_url)
+        local_checkpoints = self.local_checkpoints()
+        comfyui_reachable = self._comfyui_reachable(resolved_comfyui_url)
+        checkpoint = config.comfyui_checkpoint.strip()
+        if not checkpoint and checkpoints:
+            checkpoint = checkpoints[0]
+        if not checkpoint and local_checkpoints:
+            checkpoint = local_checkpoints[0]
+        if not workflow_ready and checkpoint:
+            notes.append("Pulsa 'Preparar entorno automatico' para crear el workflow inicial.")
+        if not comfyui_reachable:
+            notes.append("Abre ComfyUI y confirma el puerto correcto para detectar el modelo visual automaticamente.")
+        else:
+            notes.append(f"ComfyUI detectado en {resolved_comfyui_url}.")
+        if comfyui_reachable and not checkpoints:
+            notes.append("ComfyUI esta abierto, pero no hay ningun checkpoint visual detectado todavia.")
+        if local_checkpoints:
+            notes.append("Ya existe al menos un checkpoint en la carpeta compartida de VideoGeniusAI.")
+        else:
+            notes.append("Si quieres, usa 'Instalar modelo base recomendado' para automatizar tambien el checkpoint.")
+        return SetupStatus(
+            winget_available=self.winget_available(),
+            lmstudio_installed=self._package_installed(LM_STUDIO_PACKAGE_ID),
+            comfyui_installed=self._package_installed(COMFYUI_PACKAGE_ID),
+            ffmpeg_ready=bool(ffmpeg_path and self.resolve_ffprobe_path(ffmpeg_path)),
+            comfyui_reachable=comfyui_reachable,
+            workflow_ready=workflow_ready,
+            windows_tts_ready=sys.platform.startswith("win"),
+            ffmpeg_path=ffmpeg_path,
+            comfyui_checkpoint=checkpoint,
+            comfyui_base_url=resolved_comfyui_url,
+            model_folder=str(self.managed_checkpoints_dir()),
+            checkpoints=checkpoints or local_checkpoints,
+            notes=notes,
+        )
+
+    def prepare_environment(
+        self,
+        config: AppConfig,
+        *,
+        install_missing: bool = True,
+        install_default_checkpoint: bool = True,
+        progress_callback: ProgressCallback | None = None,
+    ) -> SetupPreparationResult:
+        notes: list[str] = []
+        if progress_callback:
+            progress_callback(0.05, "Validando entorno local...")
+        if install_missing and self.winget_available():
+            for package_id in [LM_STUDIO_PACKAGE_ID, COMFYUI_PACKAGE_ID, FFMPEG_PACKAGE_ID]:
+                if not self._package_installed(package_id):
+                    if progress_callback:
+                        progress_callback(0.12, f"Instalando {PACKAGE_LABELS.get(package_id, package_id)}...")
+                    self.install_package(package_id)
+                    notes.append(f"{PACKAGE_LABELS.get(package_id, package_id)} instalado correctamente.")
+
+        self.ensure_extra_models_config()
+        if progress_callback:
+            progress_callback(0.25, "Configurando carpeta compartida de modelos para ComfyUI...")
+
+        ffmpeg_path = self.resolve_ffmpeg_path(config.ffmpeg_path)
+        ffprobe_path = self.resolve_ffprobe_path(ffmpeg_path)
+        resolved_comfyui_url = self.resolve_comfyui_base_url(config.comfyui_base_url)
+        checkpoints = self._load_checkpoints(resolved_comfyui_url)
+        local_checkpoints = self.local_checkpoints()
+        comfyui_reachable = self._comfyui_reachable(resolved_comfyui_url)
+        checkpoint = config.comfyui_checkpoint.strip()
+        if not checkpoint and checkpoints:
+            checkpoint = checkpoints[0]
+        if not checkpoint and local_checkpoints:
+            checkpoint = local_checkpoints[0]
+
+        if not checkpoint and install_default_checkpoint:
+            if progress_callback:
+                progress_callback(0.3, "Descargando modelo base recomendado para ComfyUI...")
+
+            def relay(download_ratio: float, message: str) -> None:
+                if progress_callback:
+                    progress_callback(0.3 + (download_ratio * 0.45), message)
+
+            downloaded = self.download_default_checkpoint(progress_callback=relay)
+            checkpoint = downloaded.name
+            local_checkpoints = self.local_checkpoints()
+            notes.append("Se descargo el modelo base recomendado en la carpeta compartida de VideoGeniusAI.")
+
+        if progress_callback:
+            progress_callback(0.8, "Generando workflow automatico...")
+
+        workflow_path = config.comfyui_workflow_path.strip()
+        if checkpoint:
+            created_workflow = self.ensure_default_workflow(
+                checkpoint_name=checkpoint,
+                aspect_ratio=config.video_aspect_ratio,
+            )
+            workflow_path = str(created_workflow)
+            if not config.comfyui_negative_prompt.strip():
+                notes.append("Se preparo un workflow automatico listo para usar con ComfyUI.")
+        elif not checkpoints and not local_checkpoints:
+            if comfyui_reachable:
+                notes.append("ComfyUI respondio, pero no se detecto ningun modelo visual. Instala o copia un checkpoint y reinicia ComfyUI.")
+            else:
+                notes.append("No se pudo conectar con ComfyUI. Abre ComfyUI y pulsa preparar de nuevo.")
+        if checkpoint and comfyui_reachable and checkpoint not in checkpoints:
+            notes.append("El checkpoint ya esta descargado, pero ComfyUI necesita reiniciarse para detectarlo por API.")
+        if progress_callback:
+            progress_callback(0.95, "Finalizando configuracion automatica...")
+
+        status = SetupStatus(
+            winget_available=self.winget_available(),
+            lmstudio_installed=self._package_installed(LM_STUDIO_PACKAGE_ID),
+            comfyui_installed=self._package_installed(COMFYUI_PACKAGE_ID),
+            ffmpeg_ready=bool(ffmpeg_path and ffprobe_path),
+            comfyui_reachable=comfyui_reachable,
+            workflow_ready=bool(workflow_path and Path(workflow_path).exists()),
+            windows_tts_ready=sys.platform.startswith("win"),
+            ffmpeg_path=ffmpeg_path,
+            comfyui_checkpoint=checkpoint,
+            comfyui_base_url=resolved_comfyui_url,
+            model_folder=str(self.managed_checkpoints_dir()),
+            checkpoints=checkpoints or local_checkpoints,
+            notes=notes,
+        )
+
+        updates: dict[str, object] = {
+            "ffmpeg_path": ffmpeg_path,
+            "tts_backend": "Windows local",
+            "setup_completed": status.ffmpeg_ready and status.workflow_ready,
+            "comfyui_base_url": resolved_comfyui_url or config.comfyui_base_url,
+        }
+        if checkpoint:
+            updates["comfyui_checkpoint"] = checkpoint
+        if workflow_path:
+            updates["comfyui_workflow_path"] = workflow_path
+            updates["video_provider"] = "Local AI video"
+        if not config.comfyui_negative_prompt.strip():
+            updates["comfyui_negative_prompt"] = DEFAULT_NEGATIVE_PROMPT
+        return SetupPreparationResult(updates=updates, status=status)
