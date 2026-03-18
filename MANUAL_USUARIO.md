@@ -2,7 +2,7 @@
 
 ## VideoGeniusAI
 
-Version actual: `V0.0.9`
+Version actual: `V0.0.10`
 
 VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para escribir el proyecto de video y puede producir el MP4 final de dos formas:
 
@@ -70,6 +70,14 @@ Existen dos modos:
 - usa Piper para narracion si lo configuras
 - quema subtitulos locales si activas captions
 - usa FFmpeg para ensamblar el MP4 final
+- muestra porcentaje y fase actual del render en la barra de progreso
+
+### Multi-GPU y rendimiento
+
+- La app detecta las GPUs disponibles de Windows.
+- `LM Studio` maneja su propia configuracion de GPU al cargar el modelo.
+- `ComfyUI` usa una GPU por instancia mediante `CUDA device index`.
+- Si ejecutas varias instancias de ComfyUI en distintos puertos, la app puede repartir escenas entre todos los workers detectados para acelerar el render.
 
 ## 3. Flujo correcto de uso
 
@@ -173,18 +181,23 @@ http://127.0.0.1:8188
 3. Pulsa `Preparar entorno automatico`.
 4. La app intentara:
    - detectar el modelo visual de ComfyUI
+   - detectar workers de ComfyUI en puertos locales comunes
    - configurar la carpeta compartida de modelos
    - descargar el modelo base recomendado si aun no existe
    - crear el workflow inicial
    - activar `Windows local` para la narracion
    - detectar FFmpeg
-5. Si quieres evitar basura visual, llena `Negative prompt`.
-6. Si quieres narracion local avanzada:
+5. Si tienes varias instancias de ComfyUI:
+   - agrega las URLs en `ComfyUI worker URLs`
+   - ejemplo: `http://127.0.0.1:8000, http://127.0.0.1:8189`
+   - deja `Parallel workers` igual al numero de workers detectados
+6. Si quieres evitar basura visual, llena `Negative prompt`.
+7. Si quieres narracion local avanzada:
    - en `TTS backend` elige `Piper local`
    - llena `Piper executable`
    - llena `Piper model`
-7. Pulsa `Probar ComfyUI`.
-8. Pulsa `Generar video final`.
+8. Pulsa `Probar ComfyUI`.
+9. Pulsa `Generar video final`.
 
 ## 5. Workflow de ComfyUI
 
@@ -257,6 +270,17 @@ Solucion:
 2. Revisa `ComfyUI base URL`
 3. Pulsa `Abrir ComfyUI` o `Probar ComfyUI`
 4. Luego pulsa `Preparar entorno automatico`
+
+### Error: solo usa una GPU
+
+Solucion:
+
+1. Confirma cuantas GPUs detecta la app en `Instalacion guiada`
+2. En `LM Studio`, revisa sus controles de carga de GPU
+3. Si quieres acelerar el render IA con ComfyUI, ejecuta una instancia por GPU
+4. Asigna un puerto distinto a cada instancia
+5. Coloca todas las URLs en `ComfyUI worker URLs`
+6. Usa `Parallel workers` igual al numero de instancias activas
 
 ### Error: no genera el MP4
 

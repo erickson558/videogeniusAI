@@ -49,7 +49,9 @@ class SetupStatus:
     ffmpeg_path: str = ""
     comfyui_checkpoint: str = ""
     comfyui_base_url: str = ""
+    comfyui_worker_urls: list[str] = field(default_factory=list)
     model_folder: str = ""
+    gpu_names: list[str] = field(default_factory=list)
     checkpoints: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
 
@@ -62,10 +64,14 @@ class SetupStatus:
             f"Workflow automatico: {'Listo' if self.workflow_ready else 'Pendiente'}",
             f"Voz local de Windows: {'Disponible' if self.windows_tts_ready else 'No disponible'}",
         ]
+        if self.gpu_names:
+            lines.append(f"GPUs detectadas: {len(self.gpu_names)}")
         if self.comfyui_checkpoint:
             lines.append(f"Modelo visual: {self.comfyui_checkpoint}")
         if self.comfyui_base_url:
             lines.append(f"ComfyUI URL: {self.comfyui_base_url}")
+        if self.comfyui_worker_urls:
+            lines.append(f"Workers ComfyUI: {len(self.comfyui_worker_urls)}")
         if self.model_folder:
             lines.append(f"Modelos compartidos: {self.model_folder}")
         if self.notes:
@@ -87,7 +93,14 @@ class SetupManager:
         self.runtime_models_dir.mkdir(parents=True, exist_ok=True)
 
     def _candidate_comfyui_urls(self, configured_url: str) -> list[str]:
-        candidates = [configured_url.strip(), "http://127.0.0.1:8000", "http://127.0.0.1:8188"]
+        candidates = [
+            configured_url.strip(),
+            "http://127.0.0.1:8000",
+            "http://127.0.0.1:8188",
+            "http://127.0.0.1:8189",
+            "http://127.0.0.1:8190",
+            "http://127.0.0.1:8191",
+        ]
         seen: set[str] = set()
         normalized: list[str] = []
         for item in candidates:
@@ -212,6 +225,46 @@ class SetupManager:
             return False
         os.startfile(executable)  # type: ignore[attr-defined]
         return True
+
+    def detect_gpu_names(self) -> list[str]:
+        names: list[str] = []
+        nvidia_smi = which("nvidia-smi") or which("nvidia-smi.exe")
+        if nvidia_smi:
+            try:
+                result = self._run(
+                    [
+                        nvidia_smi,
+                        "--query-gpu=name",
+                        "--format=csv,noheader",
+                    ]
+                )
+                names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+                if names:
+                    return names
+            except Exception:
+                pass
+
+        if sys.platform.startswith("win"):
+            try:
+                result = self._run(
+                    [
+                        "powershell",
+                        "-NoProfile",
+                        "-NonInteractive",
+                        "-Command",
+                        "(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name | ConvertTo-Json -Compress)",
+                    ]
+                )
+                raw = result.stdout.strip()
+                if raw:
+                    payload = json.loads(raw)
+                    if isinstance(payload, list):
+                        names = [str(item).strip() for item in payload if str(item).strip()]
+                    elif isinstance(payload, str) and payload.strip():
+                        names = [payload.strip()]
+            except Exception:
+                pass
+        return names
 
     def _workflow_dimensions(self, aspect_ratio: str) -> tuple[int, int]:
         mapping = {
@@ -410,12 +463,39 @@ class SetupManager:
                 return candidate
         return configured_url.strip()
 
+    def _normalize_url_list(self, value: str) -> list[str]:
+        seen: set[str] = set()
+        items: list[str] = []
+        for part in value.split(","):
+            item = part.strip().rstrip("/")
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            items.append(item)
+        return items
+
+    def resolve_comfyui_worker_urls(self, configured_urls: str, base_url: str) -> list[str]:
+        candidates = self._normalize_url_list(configured_urls)
+        candidates.extend(self._candidate_comfyui_urls(base_url))
+        seen: set[str] = set()
+        resolved: list[str] = []
+        for item in candidates:
+            value = item.strip().rstrip("/")
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            if self._comfyui_reachable(value):
+                resolved.append(value)
+        return resolved
+
     def inspect_environment(self, config: AppConfig) -> SetupStatus:
         notes: list[str] = []
         self.ensure_extra_models_config()
+        gpu_names = self.detect_gpu_names()
         ffmpeg_path = self.resolve_ffmpeg_path(config.ffmpeg_path)
         workflow_ready = Path(config.comfyui_workflow_path).exists() if config.comfyui_workflow_path.strip() else False
         resolved_comfyui_url = self.resolve_comfyui_base_url(config.comfyui_base_url)
+        resolved_worker_urls = self.resolve_comfyui_worker_urls(config.comfyui_worker_urls, resolved_comfyui_url)
         checkpoints = self._load_checkpoints(resolved_comfyui_url)
         local_checkpoints = self.local_checkpoints()
         comfyui_reachable = self._comfyui_reachable(resolved_comfyui_url)
@@ -432,6 +512,12 @@ class SetupManager:
             notes.append(f"ComfyUI detectado en {resolved_comfyui_url}.")
         if comfyui_reachable and not checkpoints:
             notes.append("ComfyUI esta abierto, pero no hay ningun checkpoint visual detectado todavia.")
+        if len(gpu_names) >= 2:
+            notes.append("LM Studio puede aprovechar varias GPU desde sus propios controles de carga.")
+            if len(resolved_worker_urls) <= 1:
+                notes.append("Para render IA en varias GPU con ComfyUI, inicia una instancia por GPU en puertos distintos; la app repartira escenas entre todos los workers detectados.")
+        elif gpu_names:
+            notes.append("Se detecto una sola GPU activa para aceleracion local.")
         if local_checkpoints:
             notes.append("Ya existe al menos un checkpoint en la carpeta compartida de VideoGeniusAI.")
         else:
@@ -447,7 +533,9 @@ class SetupManager:
             ffmpeg_path=ffmpeg_path,
             comfyui_checkpoint=checkpoint,
             comfyui_base_url=resolved_comfyui_url,
+            comfyui_worker_urls=resolved_worker_urls,
             model_folder=str(self.managed_checkpoints_dir()),
+            gpu_names=gpu_names,
             checkpoints=checkpoints or local_checkpoints,
             notes=notes,
         )
@@ -475,9 +563,11 @@ class SetupManager:
         if progress_callback:
             progress_callback(0.25, "Configurando carpeta compartida de modelos para ComfyUI...")
 
+        gpu_names = self.detect_gpu_names()
         ffmpeg_path = self.resolve_ffmpeg_path(config.ffmpeg_path)
         ffprobe_path = self.resolve_ffprobe_path(ffmpeg_path)
         resolved_comfyui_url = self.resolve_comfyui_base_url(config.comfyui_base_url)
+        resolved_worker_urls = self.resolve_comfyui_worker_urls(config.comfyui_worker_urls, resolved_comfyui_url)
         checkpoints = self._load_checkpoints(resolved_comfyui_url)
         local_checkpoints = self.local_checkpoints()
         comfyui_reachable = self._comfyui_reachable(resolved_comfyui_url)
@@ -533,7 +623,9 @@ class SetupManager:
             ffmpeg_path=ffmpeg_path,
             comfyui_checkpoint=checkpoint,
             comfyui_base_url=resolved_comfyui_url,
+            comfyui_worker_urls=resolved_worker_urls,
             model_folder=str(self.managed_checkpoints_dir()),
+            gpu_names=gpu_names,
             checkpoints=checkpoints or local_checkpoints,
             notes=notes,
         )
@@ -543,6 +635,8 @@ class SetupManager:
             "tts_backend": "Windows local",
             "setup_completed": status.ffmpeg_ready and status.workflow_ready,
             "comfyui_base_url": resolved_comfyui_url or config.comfyui_base_url,
+            "comfyui_worker_urls": ", ".join(resolved_worker_urls),
+            "parallel_scene_workers": max(1, len(resolved_worker_urls)),
         }
         if checkpoint:
             updates["comfyui_checkpoint"] = checkpoint

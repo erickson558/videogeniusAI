@@ -108,6 +108,8 @@ class ConfigTests(unittest.TestCase):
                 video_provider="Local AI video",
                 render_captions=False,
                 comfyui_base_url="http://127.0.0.1:8188",
+                comfyui_worker_urls="http://127.0.0.1:8188, http://127.0.0.1:8189",
+                parallel_scene_workers=2,
             )
 
             reloaded = ConfigManager(config_path=config_path)
@@ -115,6 +117,8 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(reloaded.config.video_provider, "Local AI video")
             self.assertFalse(reloaded.config.render_captions)
             self.assertEqual(reloaded.config.comfyui_base_url, "http://127.0.0.1:8188")
+            self.assertEqual(reloaded.config.comfyui_worker_urls, "http://127.0.0.1:8188, http://127.0.0.1:8189")
+            self.assertEqual(reloaded.config.parallel_scene_workers, 2)
 
     def test_invalid_window_geometry_falls_back_to_default(self) -> None:
         self.assertEqual(sanitize_window_geometry("160x160+50+50"), "1460x900+80+40")
@@ -218,6 +222,22 @@ class LocalVideoSupportTests(unittest.TestCase):
         resolved = manager.resolve_comfyui_base_url("http://127.0.0.1:8188")
         self.assertEqual(resolved, "http://127.0.0.1:8000")
         self.assertIn("http://127.0.0.1:8000", checked)
+
+    def test_resolve_comfyui_worker_urls_discovers_multiple_unique_workers(self) -> None:
+        manager = SetupManager()
+
+        def fake_reachable(url: str) -> bool:
+            return url in {
+                "http://127.0.0.1:8000",
+                "http://127.0.0.1:8189",
+            }
+
+        manager._comfyui_reachable = fake_reachable  # type: ignore[method-assign]
+        resolved = manager.resolve_comfyui_worker_urls(
+            "http://127.0.0.1:8189, http://127.0.0.1:8000",
+            "http://127.0.0.1:8000",
+        )
+        self.assertEqual(resolved, ["http://127.0.0.1:8189", "http://127.0.0.1:8000"])
 
     def test_ensure_extra_models_config_writes_managed_section(self) -> None:
         previous_appdata = os.environ.get("APPDATA")

@@ -43,6 +43,8 @@ class AppConfig:
     video_aspect_ratio: str = "9:16"
     render_captions: bool = True
     comfyui_base_url: str = "http://127.0.0.1:8188"
+    comfyui_worker_urls: str = ""
+    parallel_scene_workers: int = 1
     comfyui_checkpoint: str = ""
     comfyui_workflow_path: str = ""
     comfyui_negative_prompt: str = ""

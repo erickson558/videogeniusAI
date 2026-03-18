@@ -20,6 +20,8 @@ VideoGeniusAI is a desktop app in Python for turning an idea into a structured v
 - Guided local setup for LM Studio, ComfyUI Desktop, and FFmpeg
 - Shared ComfyUI models folder plus automatic `extra_models_config.yaml` wiring
 - One-click installation of a recommended base ComfyUI checkpoint
+- GPU detection plus multi-worker ComfyUI discovery on common local ports
+- Richer video progress feedback with percentage and current render phase
 - Optional local AI rendering through ComfyUI plus built-in Windows narration or optional Piper narration
 - Simplified quick flow with a single end-to-end `Generar video completo` action
 - Persistent `config.json`, window position memory and auto-save
@@ -95,6 +97,7 @@ The app now supports two final video backends:
 
 - `Storyboard local`: create PNG storyboard frames and assemble them into an MP4 locally with FFmpeg.
 - `Local AI video`: generate a local scene asset through ComfyUI for each scene, synthesize narration with `Windows local` by default or `Piper local` optionally, and assemble the final MP4 with FFmpeg. The guided setup now probes common local ComfyUI ports automatically, including Desktop defaults.
+- If multiple ComfyUI workers are available on different local ports, the app can distribute scenes across them to reduce render time.
 
 Recommended workflow:
 

@@ -27,7 +27,11 @@ class VideoRenderService:
     def _render_storyboard(self, request: VideoRenderRequest, progress_callback: ProgressCallback | None) -> RenderedVideoResult:
         if progress_callback:
             progress_callback(0.2, "Rendering storyboard frames...")
-        image_paths = self.storyboard_service.render_storyboards(request.project, request.output_dir)
+        image_paths = self.storyboard_service.render_storyboards(
+            request.project,
+            request.output_dir,
+            progress_callback=progress_callback,
+        )
         if progress_callback:
             progress_callback(0.72, "Building MP4 with FFmpeg...")
         file_path = self.storyboard_service.build_video(
@@ -36,6 +40,8 @@ class VideoRenderService:
             image_paths=image_paths,
             ffmpeg_path=request.ffmpeg_path,
         )
+        if progress_callback:
+            progress_callback(1.0, "Storyboard MP4 completado.")
         return RenderedVideoResult(provider="Storyboard local", file_path=file_path)
 
     def render(self, request: VideoRenderRequest, progress_callback: ProgressCallback | None = None) -> RenderedVideoResult:

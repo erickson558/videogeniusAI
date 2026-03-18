@@ -26,7 +26,7 @@ def _pick_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
 
 
 class StoryboardVideoService:
-    def render_storyboards(self, project: VideoProject, output_dir: str | Path) -> list[Path]:
+    def render_storyboards(self, project: VideoProject, output_dir: str | Path, progress_callback=None) -> list[Path]:
         target_dir = Path(output_dir)
         storyboard_dir = target_dir / f"{now_stamp()}_{sanitize_filename(project.title)}_storyboard"
         storyboard_dir.mkdir(parents=True, exist_ok=True)
@@ -36,7 +36,13 @@ class StoryboardVideoService:
         small_font = _pick_font(24)
         image_paths: list[Path] = []
 
-        for scene in project.scenes:
+        total_scenes = max(1, len(project.scenes))
+        for index, scene in enumerate(project.scenes):
+            if progress_callback:
+                progress_callback(
+                    0.08 + ((index / total_scenes) * 0.5),
+                    f"Storyboard {index + 1}/{total_scenes}: renderizando escena {scene.scene_number}...",
+                )
             image = Image.new("RGB", (1280, 720), "#0F172A")
             draw = ImageDraw.Draw(image)
 

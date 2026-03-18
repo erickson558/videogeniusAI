@@ -153,6 +153,8 @@ class VideoGeniusApp(ctk.CTk):
         self.video_aspect_ratio_var = tk.StringVar(value=self.app_config.video_aspect_ratio)
         self.render_captions_var = tk.BooleanVar(value=self.app_config.render_captions)
         self.comfyui_base_url_var = tk.StringVar(value=self.app_config.comfyui_base_url)
+        self.comfyui_worker_urls_var = tk.StringVar(value=self.app_config.comfyui_worker_urls)
+        self.parallel_scene_workers_var = tk.StringVar(value=str(self.app_config.parallel_scene_workers))
         self.comfyui_checkpoint_var = tk.StringVar(value=self.app_config.comfyui_checkpoint)
         self.comfyui_workflow_path_var = tk.StringVar(value=self.app_config.comfyui_workflow_path)
         self.comfyui_negative_prompt_var = tk.StringVar(value=self.app_config.comfyui_negative_prompt)
@@ -188,6 +190,8 @@ class VideoGeniusApp(ctk.CTk):
             self.video_aspect_ratio_var,
             self.render_captions_var,
             self.comfyui_base_url_var,
+            self.comfyui_worker_urls_var,
+            self.parallel_scene_workers_var,
             self.comfyui_checkpoint_var,
             self.comfyui_workflow_path_var,
             self.comfyui_negative_prompt_var,
@@ -523,8 +527,10 @@ class VideoGeniusApp(ctk.CTk):
         self.local_ai_card = self._make_card(self.sidebar, "Local AI backend", "Needed only when the backend is Local AI video.")
         self.local_ai_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
         self._make_labeled_entry(self.local_ai_card, 2, "ComfyUI base URL", self.comfyui_base_url_var)
-        self.comfyui_checkpoint_combo = self._make_labeled_combo(self.local_ai_card, 4, "Visual model", self.comfyui_checkpoint_var, [""])
-        self._make_labeled_entry(self.local_ai_card, 6, "Workflow JSON path", self.comfyui_workflow_path_var)
+        self._make_labeled_entry(self.local_ai_card, 4, "ComfyUI worker URLs", self.comfyui_worker_urls_var)
+        self._make_labeled_entry(self.local_ai_card, 6, "Parallel workers", self.parallel_scene_workers_var)
+        self.comfyui_checkpoint_combo = self._make_labeled_combo(self.local_ai_card, 8, "Visual model", self.comfyui_checkpoint_var, [""])
+        self._make_labeled_entry(self.local_ai_card, 10, "Workflow JSON path", self.comfyui_workflow_path_var)
         workflow_button = ctk.CTkButton(
             self.local_ai_card,
             text="Browse or keep auto workflow",
@@ -532,13 +538,13 @@ class VideoGeniusApp(ctk.CTk):
             fg_color=ui_color("#0F766E", "#0F766E"),
             hover_color=ui_color("#115E59", "#134E4A"),
         )
-        workflow_button.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 10))
-        self._make_labeled_entry(self.local_ai_card, 9, "Negative prompt", self.comfyui_negative_prompt_var)
-        self._make_labeled_entry(self.local_ai_card, 11, "FFmpeg path", self.ffmpeg_path_var)
-        self._make_labeled_entry(self.local_ai_card, 13, "ComfyUI poll interval (s)", self.comfyui_poll_interval_var)
-        self._make_labeled_combo(self.local_ai_card, 15, "TTS backend", self.tts_backend_var, ["Windows local", "Sin voz", "Piper local"])
-        self.piper_executable_entry = self._make_labeled_entry(self.local_ai_card, 17, "Piper executable", self.piper_executable_path_var)
-        self.piper_model_entry = self._make_labeled_entry(self.local_ai_card, 19, "Piper model", self.piper_model_path_var)
+        workflow_button.grid(row=12, column=0, sticky="ew", padx=14, pady=(0, 10))
+        self._make_labeled_entry(self.local_ai_card, 13, "Negative prompt", self.comfyui_negative_prompt_var)
+        self._make_labeled_entry(self.local_ai_card, 15, "FFmpeg path", self.ffmpeg_path_var)
+        self._make_labeled_entry(self.local_ai_card, 17, "ComfyUI poll interval (s)", self.comfyui_poll_interval_var)
+        self._make_labeled_combo(self.local_ai_card, 19, "TTS backend", self.tts_backend_var, ["Windows local", "Sin voz", "Piper local"])
+        self.piper_executable_entry = self._make_labeled_entry(self.local_ai_card, 21, "Piper executable", self.piper_executable_path_var)
+        self.piper_model_entry = self._make_labeled_entry(self.local_ai_card, 23, "Piper model", self.piper_model_path_var)
         self.piper_button = ctk.CTkButton(
             self.local_ai_card,
             text="Browse Piper model",
@@ -546,15 +552,15 @@ class VideoGeniusApp(ctk.CTk):
             fg_color=ui_color("#2563EB", "#1D4ED8"),
             hover_color=ui_color("#1E40AF", "#1E3A8A"),
         )
-        self.piper_button.grid(row=21, column=0, sticky="ew", padx=14, pady=(0, 6))
+        self.piper_button.grid(row=25, column=0, sticky="ew", padx=14, pady=(0, 6))
         ctk.CTkLabel(
             self.local_ai_card,
-            text="Consejo: usa 'Windows local' para voz sin instalar Piper. La configuracion automatica crea el workflow por ti.",
+            text="Consejo: usa 'Windows local' para voz sin instalar Piper. Si ejecutas varias instancias de ComfyUI en puertos distintos, agrega todas las URLs y la app repartira escenas entre los workers.",
             text_color=ui_color("#94A3B8", "#94A3B8"),
             wraplength=330,
             justify="left",
             font=ctk.CTkFont("Segoe UI", 12),
-        ).grid(row=22, column=0, sticky="w", padx=14, pady=(0, 10))
+        ).grid(row=26, column=0, sticky="w", padx=14, pady=(0, 10))
         row += 1
 
         advanced_card = self._make_card(self.sidebar, "Automation and advanced", "Saved in config.json next to the app.")
@@ -649,6 +655,9 @@ class VideoGeniusApp(ctk.CTk):
         status_strip.grid_columnconfigure(0, weight=0)
         status_strip.grid_columnconfigure(1, weight=0)
         status_strip.grid_columnconfigure(2, weight=1)
+        status_strip.grid_columnconfigure(3, weight=0)
+        status_strip.grid_rowconfigure(0, weight=0)
+        status_strip.grid_rowconfigure(1, weight=0)
         self.connection_chip = ctk.CTkLabel(
             status_strip,
             text="LM Studio: not tested",
@@ -667,6 +676,22 @@ class VideoGeniusApp(ctk.CTk):
         self.progress_bar = ctk.CTkProgressBar(status_strip, progress_color=ui_color("#F97316", "#FB923C"), fg_color=THEME["progress_bg"])
         self.progress_bar.grid(row=0, column=2, sticky="ew", padx=(0, 18), pady=12)
         self.progress_bar.set(0)
+        self.progress_percent_label = ctk.CTkLabel(
+            status_strip,
+            text="0%",
+            text_color=ui_color("#FDBA74", "#FDBA74"),
+            font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
+        )
+        self.progress_percent_label.grid(row=0, column=3, sticky="e", padx=(0, 18), pady=12)
+        self.progress_detail_label = ctk.CTkLabel(
+            status_strip,
+            text="Progreso del video: en espera",
+            text_color=ui_color("#94A3B8", "#CBD5E1"),
+            font=ctk.CTkFont("Segoe UI", 12),
+            anchor="w",
+            justify="left",
+        )
+        self.progress_detail_label.grid(row=1, column=0, columnspan=4, sticky="ew", padx=18, pady=(0, 10))
 
         self.tab_view = ctk.CTkTabview(
             self.main_panel,
@@ -901,6 +926,8 @@ class VideoGeniusApp(ctk.CTk):
             video_aspect_ratio=self.video_aspect_ratio_var.get().strip() or "9:16",
             render_captions=bool(self.render_captions_var.get()),
             comfyui_base_url=self.comfyui_base_url_var.get().strip() or "http://127.0.0.1:8188",
+            comfyui_worker_urls=self.comfyui_worker_urls_var.get().strip(),
+            parallel_scene_workers=self._safe_positive_int(self.parallel_scene_workers_var.get(), 1),
             comfyui_checkpoint=self.comfyui_checkpoint_var.get().strip(),
             comfyui_workflow_path=self.comfyui_workflow_path_var.get().strip(),
             comfyui_negative_prompt=self.comfyui_negative_prompt_var.get().strip(),
@@ -999,6 +1026,8 @@ class VideoGeniusApp(ctk.CTk):
             "request_timeout_seconds": self._safe_positive_int(self.timeout_var.get(), 180),
             "render_captions": bool(self.render_captions_var.get()),
             "comfyui_base_url": self.comfyui_base_url_var.get().strip() or "http://127.0.0.1:8188",
+            "comfyui_worker_urls": self.comfyui_worker_urls_var.get().strip(),
+            "parallel_scene_workers": self._safe_positive_int(self.parallel_scene_workers_var.get(), 1),
             "comfyui_checkpoint": checkpoint,
             "comfyui_workflow_path": workflow_path,
             "comfyui_negative_prompt": self.comfyui_negative_prompt_var.get().strip(),
@@ -1019,6 +1048,8 @@ class VideoGeniusApp(ctk.CTk):
             request_timeout_seconds=options["request_timeout_seconds"],
             render_captions=options["render_captions"],
             comfyui_base_url=options["comfyui_base_url"],
+            comfyui_worker_urls=options["comfyui_worker_urls"],
+            parallel_scene_workers=options["parallel_scene_workers"],
             comfyui_checkpoint=options["comfyui_checkpoint"],
             comfyui_workflow_path=options["comfyui_workflow_path"],
             comfyui_negative_prompt=options["comfyui_negative_prompt"],
@@ -1039,7 +1070,7 @@ class VideoGeniusApp(ctk.CTk):
         self.is_busy = True
         self._toggle_busy_state(True)
         self._set_status(f"{label}...")
-        self.progress_bar.set(0.02)
+        self._set_progress_ui(0.02, label)
 
         def runner() -> None:
             try:
@@ -1059,10 +1090,12 @@ class VideoGeniusApp(ctk.CTk):
                 event_type = event.get("type")
                 # Tk widgets must be updated on the main thread, so workers push events into this queue.
                 if event_type == "progress":
-                    self.progress_bar.set(float(event.get("value", 0)))
-                    self._set_status(str(event.get("message", "")))
+                    value = float(event.get("value", 0))
+                    message = str(event.get("message", ""))
+                    self._set_progress_ui(value, message)
+                    self._set_status(message)
                 elif event_type == "error":
-                    self.progress_bar.set(0)
+                    self._set_progress_ui(0, "Progreso del video: error")
                     self._set_status(str(event.get("message", "Unknown error")), error=True)
                 elif event_type == "connection":
                     models = event.get("models", [])
@@ -1089,6 +1122,10 @@ class VideoGeniusApp(ctk.CTk):
                     if isinstance(updates, dict):
                         if "comfyui_base_url" in updates:
                             self.comfyui_base_url_var.set(str(updates.get("comfyui_base_url") or ""))
+                        if "comfyui_worker_urls" in updates:
+                            self.comfyui_worker_urls_var.set(str(updates.get("comfyui_worker_urls") or ""))
+                        if "parallel_scene_workers" in updates:
+                            self.parallel_scene_workers_var.set(str(updates.get("parallel_scene_workers") or "1"))
                         if "ffmpeg_path" in updates:
                             self.ffmpeg_path_var.set(str(updates.get("ffmpeg_path") or ""))
                         if "comfyui_checkpoint" in updates:
@@ -1112,13 +1149,20 @@ class VideoGeniusApp(ctk.CTk):
                     self.current_history_path = event.get("history_path")
                     self._render_project(self.current_project)
                     self._load_history_buttons()
-                    self.progress_bar.set(1)
-                    self._set_status("Project generated and saved to history.", success=True)
+                    if bool(event.get("finished", True)):
+                        self._set_progress_ui(1, "Proyecto generado.")
+                        self._set_status("Project generated and saved to history.", success=True)
+                    else:
+                        self._set_status("Proyecto generado. Iniciando render del video...")
                 elif event_type == "video":
-                    self.progress_bar.set(1)
+                    self._set_progress_ui(1, "Video final completado.")
                     result = event["result"]
                     destination = result.file_path or result.remote_video_url or result.remote_video_id
-                    self.render_chip.configure(text=f"Video backend: {result.provider}")
+                    workers_used = result.metadata.get("workers_used")
+                    if workers_used:
+                        self.render_chip.configure(text=f"Video backend: {result.provider} | Workers: {workers_used}")
+                    else:
+                        self.render_chip.configure(text=f"Video backend: {result.provider}")
                     self._set_status(f"Video generated with {result.provider}: {destination}", success=True)
                 elif event_type == "done":
                     self.is_busy = False
@@ -1158,6 +1202,14 @@ class VideoGeniusApp(ctk.CTk):
             self.status_label.configure(text_color=THEME["status_success"])
         else:
             self.status_label.configure(text_color=THEME["status_default"])
+
+    def _set_progress_ui(self, value: float, detail: str) -> None:
+        normalized = max(0.0, min(1.0, float(value)))
+        self.progress_bar.set(normalized)
+        if hasattr(self, "progress_percent_label"):
+            self.progress_percent_label.configure(text=f"{round(normalized * 100):d}%")
+        if hasattr(self, "progress_detail_label") and detail:
+            self.progress_detail_label.configure(text=f"Progreso del video: {detail}")
 
     def _render_project(self, project: VideoProject) -> None:
         summary_lines = [
@@ -1247,7 +1299,11 @@ class VideoGeniusApp(ctk.CTk):
                 "environment",
                 summary=summary,
                 checkpoints=status.checkpoints,
-                updates={"comfyui_base_url": self.setup_manager.resolve_comfyui_base_url(self.app_config.comfyui_base_url)},
+                updates={
+                    "comfyui_base_url": status.comfyui_base_url,
+                    "comfyui_worker_urls": ", ".join(status.comfyui_worker_urls),
+                    "parallel_scene_workers": max(1, len(status.comfyui_worker_urls)),
+                },
                 message="Environment analysis updated.",
                 success=status.ffmpeg_ready or status.comfyui_reachable or status.lmstudio_installed,
             )
@@ -1296,6 +1352,12 @@ class VideoGeniusApp(ctk.CTk):
                 "video_provider": "Local AI video",
                 "comfyui_base_url": self.setup_manager.resolve_comfyui_base_url(self.comfyui_base_url_var.get().strip()),
             }
+            resolved_workers = self.setup_manager.resolve_comfyui_worker_urls(
+                self.comfyui_worker_urls_var.get().strip(),
+                str(updates["comfyui_base_url"]),
+            )
+            updates["comfyui_worker_urls"] = ", ".join(resolved_workers)
+            updates["parallel_scene_workers"] = max(1, len(resolved_workers))
             self.config_manager.update(**updates)
             self.app_config = self.config_manager.config
             status = self.setup_manager.inspect_environment(self.app_config)
@@ -1335,7 +1397,7 @@ class VideoGeniusApp(ctk.CTk):
                 progress_callback=lambda value, message: self._queue_event("progress", value=value, message=message),
             )
             history_path = self.history_service.save(project)
-            self._queue_event("project", project=project, history_path=history_path)
+            self._queue_event("project", project=project, history_path=history_path, finished=True)
 
         self._run_in_background("Generating project", worker)
 
@@ -1373,7 +1435,7 @@ class VideoGeniusApp(ctk.CTk):
                 ),
             )
             history_path = self.history_service.save(project)
-            self._queue_event("project", project=project, history_path=history_path)
+            self._queue_event("project", project=project, history_path=history_path, finished=False)
 
             render_request = self._build_video_render_request_for_project(project, render_settings)
             result = self.video_render_service.render(

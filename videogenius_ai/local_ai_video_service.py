@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
+import threading
 import textwrap
 from pathlib import Path
 from shutil import which
@@ -112,6 +114,25 @@ class LocalAIVideoService:
         output_path = assets_dir / f"scene_{scene.scene_number:02d}.wav"
         return tts.synthesize(narration, output_path)
 
+    def _worker_urls(self, request: VideoRenderRequest) -> list[str]:
+        seen: set[str] = set()
+        urls: list[str] = []
+        for raw in [request.comfyui_base_url, *request.comfyui_worker_urls.split(",")]:
+            value = raw.strip().rstrip("/")
+            if not value or value in seen:
+                continue
+            seen.add(value)
+            urls.append(value)
+        return urls or [request.comfyui_base_url.strip().rstrip("/")]
+
+    def _effective_worker_count(self, request: VideoRenderRequest, total_scenes: int) -> int:
+        worker_urls = self._worker_urls(request)
+        return min(
+            max(1, request.parallel_scene_workers),
+            max(1, len(worker_urls)),
+            max(1, total_scenes),
+        )
+
     def _write_scene_subtitle(self, caption_text: str, duration_seconds: float, subtitle_path: Path) -> Path:
         subtitle_path.parent.mkdir(parents=True, exist_ok=True)
         wrapped = textwrap.fill(caption_text, width=38)
@@ -202,6 +223,65 @@ class LocalAIVideoService:
         )
         return output_path
 
+    def _generate_assets(
+        self,
+        *,
+        request: VideoRenderRequest,
+        assets_dir: Path,
+        progress_callback,
+    ) -> dict[int, GeneratedSceneAsset]:
+        worker_urls = self._worker_urls(request)
+        total_scenes = max(1, len(request.project.scenes))
+        max_workers = self._effective_worker_count(request, total_scenes)
+
+        assignments: list[list[int]] = [[] for _ in range(max_workers)]
+        for index in range(total_scenes):
+            assignments[index % max_workers].append(index)
+
+        lock = threading.Lock()
+        completed_assets = 0
+        generated_assets: dict[int, GeneratedSceneAsset] = {}
+
+        def run_worker(worker_index: int) -> None:
+            nonlocal completed_assets
+            client = ComfyUIClient(
+                base_url=worker_urls[worker_index],
+                timeout_seconds=request.request_timeout_seconds,
+            )
+            worker_scenes = assignments[worker_index]
+            for scene_index in worker_scenes:
+                scene = request.project.scenes[scene_index]
+                with lock:
+                    current_completed = completed_assets
+                if progress_callback:
+                    progress_callback(
+                        0.06 + (current_completed / total_scenes) * 0.44,
+                        f"Worker {worker_index + 1}/{max_workers}: generando escena {scene.scene_number}/{total_scenes}...",
+                    )
+                asset = client.generate_scene_asset(
+                    workflow_path=request.comfyui_workflow_path,
+                    prompt_text=self._scene_prompt(request, scene_index),
+                    negative_prompt=request.comfyui_negative_prompt,
+                    output_prefix=f"{sanitize_filename(request.project.title)}_scene_{scene.scene_number:02d}",
+                    destination_stem=assets_dir / f"scene_{scene.scene_number:02d}",
+                    poll_interval_seconds=request.comfyui_poll_interval_seconds,
+                )
+                with lock:
+                    generated_assets[scene_index] = asset
+                    completed_assets += 1
+                    if progress_callback:
+                        progress_callback(
+                            0.1 + (completed_assets / total_scenes) * 0.46,
+                            f"Assets IA: {completed_assets}/{total_scenes} escenas listas.",
+                        )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(run_worker, worker_index) for worker_index in range(max_workers)]
+            for future in futures:
+                future.result()
+
+        return generated_assets
+
     def render(self, request: VideoRenderRequest, progress_callback=None) -> RenderedVideoResult:
         if not request.comfyui_workflow_path.strip():
             raise ValueError("Select a ComfyUI workflow JSON file before using Local AI video mode.")
@@ -214,28 +294,19 @@ class LocalAIVideoService:
         for directory in [assets_dir, audio_dir, subtitle_dir, clips_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 
-        comfy_client = ComfyUIClient(
-            base_url=request.comfyui_base_url,
-            timeout_seconds=request.request_timeout_seconds,
-        )
         width, height = self._dimensions_for_ratio(request.aspect_ratio)
         clip_paths: list[Path] = []
-
         total_scenes = max(1, len(request.project.scenes))
+        effective_workers = self._effective_worker_count(request, total_scenes)
+        if progress_callback:
+            progress_callback(0.04, "Detectando workers de ComfyUI y preparando render IA...")
+        generated_assets = self._generate_assets(
+            request=request,
+            assets_dir=assets_dir,
+            progress_callback=progress_callback,
+        )
 
         for index, scene in enumerate(request.project.scenes):
-            progress_base = index / total_scenes
-            if progress_callback:
-                progress_callback(0.08 + progress_base * 0.55, f"Generating local asset for scene {scene.scene_number}...")
-            asset = comfy_client.generate_scene_asset(
-                workflow_path=request.comfyui_workflow_path,
-                prompt_text=self._scene_prompt(request, index),
-                negative_prompt=request.comfyui_negative_prompt,
-                output_prefix=f"{sanitize_filename(request.project.title)}_scene_{scene.scene_number:02d}",
-                destination_stem=assets_dir / f"scene_{scene.scene_number:02d}",
-                poll_interval_seconds=request.comfyui_poll_interval_seconds,
-            )
-
             audio_path = self._scene_audio(request, index, audio_dir)
             duration_seconds = self._media_duration(audio_path) if audio_path else float(scene.duration_seconds)
             subtitle_path: Path | None = None
@@ -249,9 +320,12 @@ class LocalAIVideoService:
                     )
 
             if progress_callback:
-                progress_callback(0.35 + progress_base * 0.4, f"Composing scene {scene.scene_number}...")
+                progress_callback(
+                    0.6 + ((index / total_scenes) * 0.28),
+                    f"Componiendo clip {index + 1}/{total_scenes} de la escena {scene.scene_number}...",
+                )
             clip_path = self._build_scene_clip(
-                asset=asset,
+                asset=generated_assets[index],
                 audio_path=audio_path,
                 target_duration=duration_seconds,
                 width=width,
@@ -262,15 +336,21 @@ class LocalAIVideoService:
             clip_paths.append(clip_path)
 
         if progress_callback:
-            progress_callback(0.88, "Concatenating scene clips into the final MP4...")
+            progress_callback(0.92, "Uniendo clips y finalizando el MP4...")
         output_path = Path(request.output_dir) / f"{now_stamp()}_{sanitize_filename(request.project.title)}_local_ai.mp4"
         self._concat_scene_clips(
             clip_paths=clip_paths,
             manifest_path=session_root / "concat_manifest.txt",
             output_path=output_path,
         )
+        if progress_callback:
+            progress_callback(1.0, "Video final completado.")
         return RenderedVideoResult(
             provider="Local AI video",
             file_path=output_path,
-            metadata={"session_root": str(session_root)},
+            metadata={
+                "session_root": str(session_root),
+                "workers_used": effective_workers,
+                "scenes_rendered": total_scenes,
+            },
         )

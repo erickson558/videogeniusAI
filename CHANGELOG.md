@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.0.10 - 2026-03-18
+
+- Added GPU detection and surfaced multi-GPU guidance directly in the guided setup summary.
+- Added ComfyUI worker URL discovery and configuration so the app can distribute scene rendering across multiple local ComfyUI instances.
+- Improved the video creation progress experience with an explicit percentage indicator plus current render phase details in the status strip.
+
 ## V0.0.9 - 2026-03-18
 
 - Added a fully guided ComfyUI model path setup based on a shared `VideoGeniusAI` checkpoints folder plus automatic writing of `extra_models_config.yaml`.
