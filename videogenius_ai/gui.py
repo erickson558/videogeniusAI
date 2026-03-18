@@ -24,7 +24,38 @@ from .paths import APP_ROOT
 from .version import APP_NAME, DISPLAY_VERSION
 from .video_service import StoryboardVideoService
 
-ctk.set_appearance_mode("light")
+def ui_color(light: str, dark: str) -> tuple[str, str]:
+    return (light, dark)
+
+
+THEME = {
+    "app_bg": ui_color("#E6ECF4", "#050816"),
+    "main_panel": ui_color("#F8FAFC", "#0B1120"),
+    "sidebar": ui_color("#102542", "#08101F"),
+    "status_bar": ui_color("#0F172A", "#020617"),
+    "hero": ui_color("#08101F", "#111827"),
+    "hero_text": ui_color("#F8FAFC", "#F8FAFC"),
+    "accent": ui_color("#38BDF8", "#67E8F9"),
+    "muted_text": ui_color("#475569", "#94A3B8"),
+    "soft_text": ui_color("#CBD5E1", "#CBD5E1"),
+    "primary_text": ui_color("#0F172A", "#E2E8F0"),
+    "input_bg": ui_color("#EDF2F7", "#111827"),
+    "input_border": ui_color("#D97706", "#F59E0B"),
+    "surface": ui_color("#FFFFFF", "#0F172A"),
+    "surface_alt": ui_color("#F8FAFC", "#111827"),
+    "surface_border": ui_color("#E2E8F0", "#1F2937"),
+    "card": ui_color("#0B1628", "#101827"),
+    "card_label": ui_color("#E2E8F0", "#CBD5E1"),
+    "status_default": ui_color("#E2E8F0", "#E2E8F0"),
+    "status_error": ui_color("#FCA5A5", "#FCA5A5"),
+    "status_success": ui_color("#86EFAC", "#86EFAC"),
+    "history_button": ui_color("#E2E8F0", "#1F2937"),
+    "history_hover": ui_color("#CBD5E1", "#334155"),
+    "menu_bg": ui_color("#0F172A", "#111827"),
+    "progress_bg": ui_color("#1E293B", "#1E293B"),
+}
+
+ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
@@ -34,6 +65,7 @@ class VideoGeniusApp(ctk.CTk):
         self.logger = configure_logging()
         self.config_manager = ConfigManager()
         self.app_config: AppConfig = self.config_manager.config
+        ctk.set_appearance_mode(self._normalize_appearance_mode(self.app_config.appearance_mode))
         self.generator_service = SceneGeneratorService()
         self.history_service = HistoryService()
         self.export_service = ExportService()
@@ -43,6 +75,7 @@ class VideoGeniusApp(ctk.CTk):
         self.current_history_path: Path | None = None
         self.task_queue: queue.Queue[dict[str, Any]] = queue.Queue()
         self.is_busy = False
+        self._closing = False
         self._save_job_id: str | None = None
         self._geometry_job_id: str | None = None
         self._countdown_job_id: str | None = None
@@ -66,7 +99,7 @@ class VideoGeniusApp(ctk.CTk):
         self.title(f"{APP_NAME} {DISPLAY_VERSION}")
         self.geometry(self.app_config.window_geometry)
         self.minsize(1320, 840)
-        self.configure(fg_color="#E6ECF4")
+        self.configure(fg_color=THEME["app_bg"])
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.report_callback_exception = self._report_callback_exception
         icon_path = APP_ROOT / f"{APP_NAME.lower()}.ico"
@@ -78,7 +111,25 @@ class VideoGeniusApp(ctk.CTk):
         if self.app_config.window_zoomed:
             self.after(300, lambda: self.state("zoomed"))
 
+    def _normalize_appearance_mode(self, value: str) -> str:
+        normalized = (value or "dark").strip().lower()
+        if normalized not in {"light", "dark", "system"}:
+            return "dark"
+        return normalized
+
+    def _appearance_label_to_mode(self, value: str) -> str:
+        mapping = {"Claro": "light", "Oscuro": "dark", "Sistema": "system"}
+        return mapping.get(value, self._normalize_appearance_mode(value))
+
+    def _appearance_mode_to_label(self, value: str) -> str:
+        mapping = {"light": "Claro", "dark": "Oscuro", "system": "Sistema"}
+        return mapping.get(self._normalize_appearance_mode(value), "Oscuro")
+
+    def _apply_user_appearance_mode(self, mode: str) -> None:
+        ctk.set_appearance_mode(self._normalize_appearance_mode(mode))
+
     def _create_variables(self) -> None:
+        self.appearance_mode_var = tk.StringVar(value=self._appearance_mode_to_label(self.app_config.appearance_mode))
         self.base_url_var = tk.StringVar(value=self.app_config.lmstudio_base_url)
         self.model_var = tk.StringVar(value=self.app_config.model)
         self.api_key_var = tk.StringVar(value=self.app_config.api_key)
@@ -101,6 +152,7 @@ class VideoGeniusApp(ctk.CTk):
         self.show_api_key_var = tk.BooleanVar(value=False)
 
         for variable in [
+            self.appearance_mode_var,
             self.base_url_var,
             self.model_var,
             self.api_key_var,
@@ -142,8 +194,18 @@ class VideoGeniusApp(ctk.CTk):
 
         help_menu = tk.Menu(menu_bar, tearoff=0)
         help_menu.add_command(label="About", accelerator="F1", command=self.show_about_dialog)
+        menu_bar.add_cascade(label="Vista", menu=self._build_view_menu(menu_bar))
         menu_bar.add_cascade(label="Ayuda", menu=help_menu)
         self.config(menu=menu_bar)
+
+    def _build_view_menu(self, menu_bar: tk.Menu) -> tk.Menu:
+        view_menu = tk.Menu(menu_bar, tearoff=0)
+        view_menu.add_radiobutton(label="Tema oscuro", value="Oscuro", variable=self.appearance_mode_var, command=self._on_appearance_change)
+        view_menu.add_radiobutton(label="Tema claro", value="Claro", variable=self.appearance_mode_var, command=self._on_appearance_change)
+        view_menu.add_radiobutton(label="Tema del sistema", value="Sistema", variable=self.appearance_mode_var, command=self._on_appearance_change)
+        view_menu.add_separator()
+        view_menu.add_command(label="Alternar oscuro/claro", accelerator="Ctrl+Shift+D", command=self.toggle_dark_mode)
+        return view_menu
 
     def _bind_shortcuts(self) -> None:
         self.bind_all("<Control-n>", lambda event: self.reset_form())
@@ -155,6 +217,8 @@ class VideoGeniusApp(ctk.CTk):
         self.bind_all("<Control-m>", lambda event: self.generate_video())
         self.bind_all("<Control-o>", lambda event: self.open_output_folder())
         self.bind_all("<Control-q>", lambda event: self._on_close())
+        self.bind_all("<Control-Shift-D>", lambda event: self.toggle_dark_mode())
+        self.bind_all("<Control-Shift-d>", lambda event: self.toggle_dark_mode())
         self.bind_all("<F1>", lambda event: self.show_about_dialog())
 
     def _bind_activity_reset(self) -> None:
@@ -171,32 +235,32 @@ class VideoGeniusApp(ctk.CTk):
         self.sidebar = ctk.CTkScrollableFrame(
             self,
             width=410,
-            fg_color="#102542",
+            fg_color=THEME["sidebar"],
             corner_radius=26,
             border_width=0,
         )
         self.sidebar.grid(row=0, column=0, padx=(18, 10), pady=(18, 10), sticky="nsew")
         self.sidebar.grid_columnconfigure(0, weight=1)
 
-        self.main_panel = ctk.CTkFrame(self, fg_color="#F8FAFC", corner_radius=28)
+        self.main_panel = ctk.CTkFrame(self, fg_color=THEME["main_panel"], corner_radius=28)
         self.main_panel.grid(row=0, column=1, padx=(10, 18), pady=(18, 10), sticky="nsew")
         self.main_panel.grid_columnconfigure(0, weight=1)
         self.main_panel.grid_rowconfigure(2, weight=1)
 
-        self.status_bar = ctk.CTkFrame(self, fg_color="#0F172A", corner_radius=18, height=42)
+        self.status_bar = ctk.CTkFrame(self, fg_color=THEME["status_bar"], corner_radius=18, height=42)
         self.status_bar.grid(row=1, column=0, columnspan=2, padx=18, pady=(0, 18), sticky="ew")
         self.status_bar.grid_columnconfigure(0, weight=1)
         self.status_label = ctk.CTkLabel(
             self.status_bar,
             text="",
-            text_color="#E2E8F0",
+            text_color=THEME["status_default"],
             font=ctk.CTkFont("Segoe UI", 13),
         )
         self.status_label.grid(row=0, column=0, padx=16, pady=8, sticky="w")
         self.countdown_label = ctk.CTkLabel(
             self.status_bar,
             text=f"{DISPLAY_VERSION} | Auto-close off",
-            text_color="#93C5FD",
+            text_color=ui_color("#93C5FD", "#67E8F9"),
             font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
         )
         self.countdown_label.grid(row=0, column=1, padx=16, pady=8, sticky="e")
@@ -205,25 +269,25 @@ class VideoGeniusApp(ctk.CTk):
         self._build_main_panel()
 
     def _build_sidebar(self) -> None:
-        hero = ctk.CTkFrame(self.sidebar, fg_color="#08101F", corner_radius=26)
+        hero = ctk.CTkFrame(self.sidebar, fg_color=THEME["hero"], corner_radius=26)
         hero.grid(row=0, column=0, sticky="ew", padx=10, pady=(8, 14))
         hero.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             hero,
             text=APP_NAME,
-            text_color="#F8FAFC",
+            text_color=THEME["hero_text"],
             font=ctk.CTkFont("Segoe UI Variable Display", 28, weight="bold"),
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 4))
         ctk.CTkLabel(
             hero,
             text=f"{DISPLAY_VERSION}  |  LM Studio video authoring desktop",
-            text_color="#38BDF8",
+            text_color=THEME["accent"],
             font=ctk.CTkFont("Segoe UI", 13),
         ).grid(row=1, column=0, sticky="w", padx=18, pady=(0, 4))
         ctk.CTkLabel(
             hero,
             text="Turn an idea into script, prompts, storyboard and MP4 without blocking the UI.",
-            text_color="#CBD5E1",
+            text_color=THEME["soft_text"],
             justify="left",
             wraplength=340,
             font=ctk.CTkFont("Segoe UI", 14),
@@ -235,10 +299,10 @@ class VideoGeniusApp(ctk.CTk):
         self.topic_text = ctk.CTkTextbox(
             topic_card,
             height=120,
-            fg_color="#EDF2F7",
-            text_color="#0F172A",
+            fg_color=THEME["input_bg"],
+            text_color=THEME["primary_text"],
             border_width=1,
-            border_color="#D97706",
+            border_color=THEME["input_border"],
         )
         self.topic_text.grid(row=2, column=0, padx=14, pady=(4, 14), sticky="ew")
         self.topic_text.insert("1.0", self.app_config.video_topic)
@@ -261,29 +325,29 @@ class VideoGeniusApp(ctk.CTk):
         ctk.CTkLabel(
             lm_card,
             text="API key (optional)",
-            text_color="#E2E8F0",
+            text_color=THEME["card_label"],
             font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
         ).grid(row=6, column=0, sticky="w", padx=14, pady=(10, 4))
         api_row = ctk.CTkFrame(lm_card, fg_color="transparent")
         api_row.grid(row=7, column=0, padx=14, pady=(0, 8), sticky="ew")
         api_row.grid_columnconfigure(0, weight=1)
-        self.api_key_entry = ctk.CTkEntry(api_row, textvariable=self.api_key_var, show="*", fg_color="#EDF2F7", text_color="#0F172A")
+        self.api_key_entry = ctk.CTkEntry(api_row, textvariable=self.api_key_var, show="*", fg_color=THEME["input_bg"], text_color=THEME["primary_text"])
         self.api_key_entry.grid(row=0, column=0, sticky="ew")
         self.show_api_key_button = ctk.CTkButton(
             api_row,
             text="Mostrar",
             width=90,
             command=self.toggle_api_key_visibility,
-            fg_color="#1D4ED8",
-            hover_color="#1E40AF",
+            fg_color=ui_color("#1D4ED8", "#2563EB"),
+            hover_color=ui_color("#1E40AF", "#1D4ED8"),
         )
         self.show_api_key_button.grid(row=0, column=1, padx=(10, 0))
 
         slider_row = ctk.CTkFrame(lm_card, fg_color="transparent")
         slider_row.grid(row=8, column=0, padx=14, pady=(6, 2), sticky="ew")
         slider_row.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(slider_row, text="Temperature", text_color="#E2E8F0", font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(row=0, column=0, sticky="w")
-        self.temperature_value_label = ctk.CTkLabel(slider_row, text=f"{self.temperature_var.get():.2f}", text_color="#38BDF8")
+        ctk.CTkLabel(slider_row, text="Temperature", text_color=THEME["card_label"], font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(row=0, column=0, sticky="w")
+        self.temperature_value_label = ctk.CTkLabel(slider_row, text=f"{self.temperature_var.get():.2f}", text_color=THEME["accent"])
         self.temperature_value_label.grid(row=0, column=1, sticky="e")
         self.temperature_slider = ctk.CTkSlider(
             lm_card,
@@ -292,8 +356,8 @@ class VideoGeniusApp(ctk.CTk):
             number_of_steps=30,
             variable=self.temperature_var,
             command=self._on_temperature_change,
-            button_color="#F97316",
-            progress_color="#F59E0B",
+            button_color=ui_color("#F97316", "#FB923C"),
+            progress_color=ui_color("#F59E0B", "#F97316"),
         )
         self.temperature_slider.grid(row=9, column=0, padx=14, pady=(0, 10), sticky="ew")
 
@@ -304,15 +368,17 @@ class VideoGeniusApp(ctk.CTk):
 
         advanced_card = self._make_card(self.sidebar, "Automation and advanced", "Saved in config.json next to the app.")
         advanced_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
-        self._make_labeled_entry(advanced_card, 2, "Output folder", self.output_dir_var)
+        self.appearance_combo = self._make_labeled_combo(advanced_card, 2, "Tema", self.appearance_mode_var, ["Oscuro", "Claro", "Sistema"])
+        self.appearance_combo.configure(command=lambda _value: self._on_appearance_change())
+        self._make_labeled_entry(advanced_card, 4, "Output folder", self.output_dir_var)
         browse_button = ctk.CTkButton(
             advanced_card,
             text="Browse",
             command=self.choose_output_folder,
-            fg_color="#0F766E",
-            hover_color="#115E59",
+            fg_color=ui_color("#0F766E", "#0F766E"),
+            hover_color=ui_color("#115E59", "#134E4A"),
         )
-        browse_button.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 10))
+        browse_button.grid(row=6, column=0, sticky="ew", padx=14, pady=(0, 10))
 
         self.auto_start_checkbox = ctk.CTkCheckBox(
             advanced_card,
@@ -320,9 +386,9 @@ class VideoGeniusApp(ctk.CTk):
             variable=self.auto_start_var,
             checkbox_width=20,
             checkbox_height=20,
-            text_color="#F8FAFC",
+            text_color=THEME["hero_text"],
         )
-        self.auto_start_checkbox.grid(row=5, column=0, sticky="w", padx=14, pady=(2, 6))
+        self.auto_start_checkbox.grid(row=7, column=0, sticky="w", padx=14, pady=(2, 6))
 
         self.auto_close_checkbox = ctk.CTkCheckBox(
             advanced_card,
@@ -330,14 +396,14 @@ class VideoGeniusApp(ctk.CTk):
             variable=self.auto_close_var,
             checkbox_width=20,
             checkbox_height=20,
-            text_color="#F8FAFC",
+            text_color=THEME["hero_text"],
         )
-        self.auto_close_checkbox.grid(row=6, column=0, sticky="w", padx=14, pady=(2, 6))
+        self.auto_close_checkbox.grid(row=8, column=0, sticky="w", padx=14, pady=(2, 6))
 
-        self._make_labeled_entry(advanced_card, 7, "Auto-close seconds", self.auto_close_seconds_var)
-        self._make_labeled_entry(advanced_card, 9, "JSON retry attempts", self.retries_var)
-        self._make_labeled_entry(advanced_card, 11, "Request timeout (s)", self.timeout_var)
-        self._make_labeled_entry(advanced_card, 13, "Max tokens", self.max_tokens_var)
+        self._make_labeled_entry(advanced_card, 9, "Auto-close seconds", self.auto_close_seconds_var)
+        self._make_labeled_entry(advanced_card, 11, "JSON retry attempts", self.retries_var)
+        self._make_labeled_entry(advanced_card, 13, "Request timeout (s)", self.timeout_var)
+        self._make_labeled_entry(advanced_card, 15, "Max tokens", self.max_tokens_var)
         row += 1
 
         actions_card = self._make_card(self.sidebar, "Actions", "Keyboard shortcuts are also available from the menu.")
@@ -352,7 +418,7 @@ class VideoGeniusApp(ctk.CTk):
         self.exit_button = self._make_action_button(actions_card, 9, "Salir (Ctrl+Q)", "#7F1D1D", "#7C2D12", self._on_close)
 
     def _build_main_panel(self) -> None:
-        header = ctk.CTkFrame(self.main_panel, fg_color="#FFFFFF", corner_radius=24)
+        header = ctk.CTkFrame(self.main_panel, fg_color=THEME["surface"], corner_radius=24)
         header.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 12))
         header.grid_columnconfigure(0, weight=1)
         header.grid_columnconfigure(1, weight=0)
@@ -362,7 +428,7 @@ class VideoGeniusApp(ctk.CTk):
         ctk.CTkLabel(
             left,
             text="Video workshop",
-            text_color="#0F172A",
+            text_color=THEME["primary_text"],
             font=ctk.CTkFont("Segoe UI Variable Display", 34, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
@@ -370,7 +436,7 @@ class VideoGeniusApp(ctk.CTk):
             text="Generate structured video projects, review each scene, export assets, and build a storyboard MP4.",
             wraplength=760,
             justify="left",
-            text_color="#475569",
+            text_color=THEME["muted_text"],
             font=ctk.CTkFont("Segoe UI", 14),
         ).grid(row=1, column=0, sticky="w", pady=(4, 0))
 
@@ -378,36 +444,37 @@ class VideoGeniusApp(ctk.CTk):
             header,
             values=["Solo guion", "Guion + prompts", "Proyecto completo"],
             variable=self.mode_var,
-            selected_color="#F97316",
-            selected_hover_color="#EA580C",
-            unselected_color="#E2E8F0",
-            unselected_hover_color="#CBD5E1",
-            text_color="#0F172A",
+            selected_color=ui_color("#F97316", "#F97316"),
+            selected_hover_color=ui_color("#EA580C", "#EA580C"),
+            unselected_color=ui_color("#E2E8F0", "#1F2937"),
+            unselected_hover_color=ui_color("#CBD5E1", "#334155"),
+            text_color=THEME["primary_text"],
         )
         self.mode_segment.grid(row=0, column=1, padx=18, pady=18, sticky="e")
 
-        status_strip = ctk.CTkFrame(self.main_panel, fg_color="#0F172A", corner_radius=22)
+        status_strip = ctk.CTkFrame(self.main_panel, fg_color=THEME["status_bar"], corner_radius=22)
         status_strip.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 12))
         status_strip.grid_columnconfigure(0, weight=1)
         status_strip.grid_columnconfigure(1, weight=1)
         self.connection_chip = ctk.CTkLabel(
             status_strip,
             text="LM Studio: not tested",
-            text_color="#BFDBFE",
+            text_color=ui_color("#BFDBFE", "#7DD3FC"),
             font=ctk.CTkFont("Segoe UI", 14, weight="bold"),
         )
         self.connection_chip.grid(row=0, column=0, sticky="w", padx=18, pady=12)
 
-        self.progress_bar = ctk.CTkProgressBar(status_strip, progress_color="#F97316", fg_color="#1E293B")
+        self.progress_bar = ctk.CTkProgressBar(status_strip, progress_color=ui_color("#F97316", "#FB923C"), fg_color=THEME["progress_bg"])
         self.progress_bar.grid(row=0, column=1, sticky="ew", padx=(0, 18), pady=12)
         self.progress_bar.set(0)
 
         self.tab_view = ctk.CTkTabview(
             self.main_panel,
-            fg_color="#FFFFFF",
-            segmented_button_selected_color="#0F766E",
-            segmented_button_selected_hover_color="#115E59",
-            segmented_button_unselected_color="#E2E8F0",
+            fg_color=THEME["surface"],
+            segmented_button_selected_color=ui_color("#0F766E", "#0F766E"),
+            segmented_button_selected_hover_color=ui_color("#115E59", "#134E4A"),
+            segmented_button_unselected_color=ui_color("#E2E8F0", "#1F2937"),
+            segmented_button_unselected_hover_color=ui_color("#CBD5E1", "#334155"),
             corner_radius=26,
         )
         self.tab_view.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 18))
@@ -430,34 +497,34 @@ class VideoGeniusApp(ctk.CTk):
         ctk.CTkLabel(
             history_header,
             text="Saved projects",
-            text_color="#0F172A",
+            text_color=THEME["primary_text"],
             font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkButton(
             history_header,
             text="Refresh",
             command=self._load_history_buttons,
-            fg_color="#1D4ED8",
-            hover_color="#1E40AF",
+            fg_color=ui_color("#1D4ED8", "#2563EB"),
+            hover_color=ui_color("#1E40AF", "#1D4ED8"),
             width=110,
         ).grid(row=0, column=1, sticky="e")
-        self.history_scroll = ctk.CTkScrollableFrame(self.history_tab, fg_color="#F8FAFC", corner_radius=18)
+        self.history_scroll = ctk.CTkScrollableFrame(self.history_tab, fg_color=THEME["surface_alt"], corner_radius=18)
         self.history_scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
         self.history_scroll.grid_columnconfigure(0, weight=1)
 
     def _make_card(self, parent: ctk.CTkBaseClass, title: str, subtitle: str) -> ctk.CTkFrame:
-        card = ctk.CTkFrame(parent, fg_color="#0B1628", corner_radius=22)
+        card = ctk.CTkFrame(parent, fg_color=THEME["card"], corner_radius=22)
         card.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             card,
             text=title,
-            text_color="#F8FAFC",
+            text_color=THEME["hero_text"],
             font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
         ).grid(row=0, column=0, sticky="w", padx=14, pady=(14, 4))
         ctk.CTkLabel(
             card,
             text=subtitle,
-            text_color="#94A3B8",
+            text_color=ui_color("#94A3B8", "#94A3B8"),
             wraplength=330,
             justify="left",
             font=ctk.CTkFont("Segoe UI", 12),
@@ -465,26 +532,34 @@ class VideoGeniusApp(ctk.CTk):
         return card
 
     def _make_labeled_entry(self, parent: ctk.CTkBaseClass, row: int, label: str, variable: tk.Variable) -> ctk.CTkEntry:
-        ctk.CTkLabel(parent, text=label, text_color="#E2E8F0", font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(
+        ctk.CTkLabel(parent, text=label, text_color=THEME["card_label"], font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(
             row=row,
             column=0,
             sticky="w",
             padx=14,
             pady=(8, 4),
         )
-        entry = ctk.CTkEntry(parent, textvariable=variable, fg_color="#EDF2F7", text_color="#0F172A")
+        entry = ctk.CTkEntry(parent, textvariable=variable, fg_color=THEME["input_bg"], text_color=THEME["primary_text"])
         entry.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(0, 8))
         return entry
 
     def _make_labeled_combo(self, parent: ctk.CTkBaseClass, row: int, label: str, variable: tk.StringVar, values: list[str]) -> ctk.CTkComboBox:
-        ctk.CTkLabel(parent, text=label, text_color="#E2E8F0", font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(
+        ctk.CTkLabel(parent, text=label, text_color=THEME["card_label"], font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(
             row=row,
             column=0,
             sticky="w",
             padx=14,
             pady=(8, 4),
         )
-        combo = ctk.CTkComboBox(parent, variable=variable, values=values, fg_color="#EDF2F7", text_color="#0F172A", button_color="#1D4ED8")
+        combo = ctk.CTkComboBox(
+            parent,
+            variable=variable,
+            values=values,
+            fg_color=THEME["input_bg"],
+            text_color=THEME["primary_text"],
+            button_color=ui_color("#1D4ED8", "#2563EB"),
+            button_hover_color=ui_color("#1E40AF", "#1D4ED8"),
+        )
         combo.grid(row=row + 1, column=0, sticky="ew", padx=14, pady=(0, 8))
         return combo
 
@@ -504,7 +579,7 @@ class VideoGeniusApp(ctk.CTk):
     def _make_output_textbox(self, tab: ctk.CTkBaseClass) -> ctk.CTkTextbox:
         tab.grid_columnconfigure(0, weight=1)
         tab.grid_rowconfigure(0, weight=1)
-        textbox = ctk.CTkTextbox(tab, fg_color="#F8FAFC", text_color="#0F172A", border_width=1, border_color="#E2E8F0")
+        textbox = ctk.CTkTextbox(tab, fg_color=THEME["surface_alt"], text_color=THEME["primary_text"], border_width=1, border_color=THEME["surface_border"])
         textbox.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
         textbox.insert("1.0", "No project loaded yet.")
         textbox.configure(state="disabled")
@@ -513,6 +588,18 @@ class VideoGeniusApp(ctk.CTk):
     def _on_temperature_change(self, value: float) -> None:
         self.temperature_value_label.configure(text=f"{value:.2f}")
         self._schedule_save()
+
+    def _on_appearance_change(self) -> None:
+        mode = self._appearance_label_to_mode(self.appearance_mode_var.get())
+        self._apply_user_appearance_mode(mode)
+        self._schedule_save()
+        self._set_status(f"Tema actualizado: {self.appearance_mode_var.get()}")
+
+    def toggle_dark_mode(self) -> None:
+        current = self._appearance_label_to_mode(self.appearance_mode_var.get())
+        new_mode = "light" if current == "dark" else "dark"
+        self.appearance_mode_var.set(self._appearance_mode_to_label(new_mode))
+        self._on_appearance_change()
 
     def toggle_api_key_visibility(self) -> None:
         show = not self.show_api_key_var.get()
@@ -526,7 +613,7 @@ class VideoGeniusApp(ctk.CTk):
         self._set_status(f"Unhandled error: {value}", error=True)
 
     def _on_configure(self, event: tk.Event) -> None:
-        if event.widget is self:
+        if not self._closing and event.widget is self:
             if self._geometry_job_id:
                 self.after_cancel(self._geometry_job_id)
             self._geometry_job_id = self.after(700, self._save_window_geometry)
@@ -541,13 +628,28 @@ class VideoGeniusApp(ctk.CTk):
             self.config_manager.update(window_zoomed=True)
 
     def _schedule_save(self) -> None:
+        if self._closing:
+            return
         if self._save_job_id:
             self.after_cancel(self._save_job_id)
         self._save_job_id = self.after(250, self._save_gui_state)
 
+    def _cancel_scheduled_jobs(self) -> None:
+        for attribute in ["_save_job_id", "_geometry_job_id", "_countdown_job_id"]:
+            job_id = getattr(self, attribute)
+            if job_id:
+                try:
+                    self.after_cancel(job_id)
+                except tk.TclError:
+                    pass
+                setattr(self, attribute, None)
+
     def _save_gui_state(self) -> None:
         self._save_job_id = None
+        appearance_mode = self._appearance_label_to_mode(self.appearance_mode_var.get())
+        self._apply_user_appearance_mode(appearance_mode)
         self.config_manager.update(
+            appearance_mode=appearance_mode,
             lmstudio_base_url=self.base_url_var.get().strip(),
             model=self.model_var.get().strip(),
             api_key=self.api_key_var.get(),
@@ -668,7 +770,8 @@ class VideoGeniusApp(ctk.CTk):
         except queue.Empty:
             pass
         finally:
-            self.after(150, self._process_task_queue)
+            if not self._closing and self.winfo_exists():
+                self.after(150, self._process_task_queue)
 
     def _toggle_busy_state(self, busy: bool) -> None:
         state = "disabled" if busy else "normal"
@@ -686,11 +789,11 @@ class VideoGeniusApp(ctk.CTk):
     def _set_status(self, message: str, *, success: bool = False, error: bool = False) -> None:
         self.status_label.configure(text=message)
         if error:
-            self.status_label.configure(text_color="#FCA5A5")
+            self.status_label.configure(text_color=THEME["status_error"])
         elif success:
-            self.status_label.configure(text_color="#86EFAC")
+            self.status_label.configure(text_color=THEME["status_success"])
         else:
-            self.status_label.configure(text_color="#E2E8F0")
+            self.status_label.configure(text_color=THEME["status_default"])
 
     def _render_project(self, project: VideoProject) -> None:
         summary_lines = [
@@ -734,8 +837,13 @@ class VideoGeniusApp(ctk.CTk):
         textbox.configure(state="disabled")
 
     def _load_models_background(self) -> None:
-        def worker() -> None:
+        try:
             client = self._build_client()
+        except Exception as exc:
+            self._set_status(str(exc), error=True)
+            return
+
+        def worker() -> None:
             success, models, message = client.test_connection()
             if not success:
                 raise requests.RequestException(message)
@@ -747,10 +855,16 @@ class VideoGeniusApp(ctk.CTk):
         self._load_models_background()
 
     def start_generation(self) -> None:
-        def worker() -> None:
-            self._queue_event("progress", value=0.05, message="Preparing generation request...")
+        try:
             client = self._build_client()
             request = self._build_request()
+            retry_attempts = self._safe_positive_int(self.retries_var.get(), 3)
+        except Exception as exc:
+            self._set_status(str(exc), error=True)
+            return
+
+        def worker() -> None:
+            self._queue_event("progress", value=0.05, message="Preparing generation request...")
             if not request.model:
                 models = client.list_models()
                 if not models:
@@ -761,7 +875,7 @@ class VideoGeniusApp(ctk.CTk):
             project = self.generator_service.generate(
                 client=client,
                 request=request,
-                retry_attempts=self._safe_positive_int(self.retries_var.get(), 3),
+                retry_attempts=retry_attempts,
                 progress_callback=lambda value, message: self._queue_event("progress", value=value, message=message),
             )
             history_path = self.history_service.save(project)
@@ -827,7 +941,7 @@ class VideoGeniusApp(ctk.CTk):
             ctk.CTkLabel(
                 self.history_scroll,
                 text="No saved projects yet.",
-                text_color="#475569",
+                text_color=THEME["muted_text"],
             ).grid(row=0, column=0, sticky="w", padx=12, pady=12)
             return
 
@@ -836,9 +950,9 @@ class VideoGeniusApp(ctk.CTk):
                 self.history_scroll,
                 text=entry.file_path.stem,
                 anchor="w",
-                fg_color="#E2E8F0",
-                text_color="#0F172A",
-                hover_color="#CBD5E1",
+                fg_color=THEME["history_button"],
+                text_color=THEME["primary_text"],
+                hover_color=THEME["history_hover"],
                 command=lambda item=entry: self.load_history_entry(item),
             )
             button.grid(row=index, column=0, sticky="ew", padx=10, pady=(8 if index == 0 else 0, 8))
@@ -870,7 +984,7 @@ class VideoGeniusApp(ctk.CTk):
         dialog.title("About")
         dialog.geometry("500x190")
         dialog.resizable(False, False)
-        dialog.configure(fg_color="#0F172A")
+        dialog.configure(fg_color=THEME["status_bar"])
         dialog.transient(self)
         dialog.grab_set()
 
@@ -879,13 +993,13 @@ class VideoGeniusApp(ctk.CTk):
         ctk.CTkLabel(
             dialog,
             text=APP_NAME,
-            text_color="#F8FAFC",
+            text_color=THEME["hero_text"],
             font=ctk.CTkFont("Segoe UI Variable Display", 28, weight="bold"),
         ).pack(pady=(26, 8))
         ctk.CTkLabel(
             dialog,
             text=text,
-            text_color="#CBD5E1",
+            text_color=THEME["soft_text"],
             font=ctk.CTkFont("Segoe UI", 15),
             wraplength=420,
             justify="center",
@@ -894,8 +1008,8 @@ class VideoGeniusApp(ctk.CTk):
             dialog,
             text="Cerrar",
             command=dialog.destroy,
-            fg_color="#EA580C",
-            hover_color="#C2410C",
+            fg_color=ui_color("#EA580C", "#EA580C"),
+            hover_color=ui_color("#C2410C", "#C2410C"),
             width=120,
         ).pack()
 
@@ -926,6 +1040,8 @@ class VideoGeniusApp(ctk.CTk):
         self.countdown_label.configure(text=f"{DISPLAY_VERSION} | Auto-close in {self._auto_close_remaining}s")
 
     def _tick_auto_close(self) -> None:
+        if self._closing or not self.winfo_exists():
+            return
         if self.auto_close_var.get() and not self.is_busy:
             self._auto_close_remaining -= 1
             if self._auto_close_remaining <= 0:
@@ -936,9 +1052,18 @@ class VideoGeniusApp(ctk.CTk):
         self._countdown_job_id = self.after(1000, self._tick_auto_close)
 
     def _on_close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        self._cancel_scheduled_jobs()
         self._save_gui_state()
         self._save_window_geometry()
-        self.destroy()
+        if self.winfo_exists():
+            try:
+                self.quit()
+            except tk.TclError:
+                pass
+            self.after_idle(self.destroy)
 
 
 def run() -> None:

@@ -5,6 +5,7 @@ VideoGeniusAI is a desktop app in Python for turning an idea into a structured v
 ## Main features
 
 - Modern desktop UI built with `CustomTkinter`
+- Persistent light/dark/system theme with a dedicated toggle in the UI
 - Non-blocking generation flow so the UI stays responsive
 - LM Studio connection test and model discovery
 - Structured JSON generation with retries and validation
@@ -50,6 +51,13 @@ videogeniusAI/
 - LM Studio running locally with an OpenAI-compatible server enabled
 - FFmpeg in `PATH` if you want MP4 output
 
+## Dependencies
+
+- `customtkinter` for the desktop interface
+- `requests` for LM Studio HTTP calls
+- `Pillow` for storyboard image generation
+- `PyInstaller` for Windows packaging
+
 ## Installation
 
 ```powershell
@@ -75,6 +83,18 @@ powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 
 The EXE is generated in the project root and uses the local `.ico`.
 
+## Release automation
+
+The repository includes a GitHub Actions workflow at `.github/workflows/release.yml`.
+
+On every push to `main`, the workflow:
+
+- installs dependencies
+- runs the unit tests
+- rebuilds `videogeniusAI.exe`
+- creates or updates the Git tag that matches the app version
+- publishes a GitHub Release with the compiled EXE attached
+
 ## Git / versioning workflow
 
 Each commit should bump the patch version:
@@ -89,6 +109,7 @@ The version must stay aligned in:
 - Source code
 - Git tag or release notes
 - GitHub repository state
+- GitHub Release asset metadata
 
 ## Example LM Studio prompt contract
 
@@ -126,4 +147,3 @@ The app asks LM Studio to return valid JSON with keys like:
 ## License
 
 Apache License 2.0
-

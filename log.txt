@@ -7,3 +7,98 @@ Traceback (most recent call last):
   File "videogenius_ai\gui.py", line 741, in worker
     raise requests.RequestException(message)
 requests.exceptions.RequestException: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/models (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+2026-03-18 11:15:27,823 | ERROR | videogenius_ai | Background task failed: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/models (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+Traceback (most recent call last):
+  File "videogenius_ai\gui.py", line 623, in runner
+    worker()
+  File "videogenius_ai\gui.py", line 741, in worker
+    raise requests.RequestException(message)
+requests.exceptions.RequestException: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/models (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+2026-03-18 11:17:48,305 | ERROR | videogenius_ai | Background task failed: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/models (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+Traceback (most recent call last):
+  File "videogenius_ai\gui.py", line 623, in runner
+    worker()
+  File "videogenius_ai\gui.py", line 741, in worker
+    raise requests.RequestException(message)
+requests.exceptions.RequestException: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/models (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+2026-03-18 11:34:38,743 | ERROR | videogenius_ai | Background task failed: Enter a topic or idea before generating.
+Traceback (most recent call last):
+  File "videogenius_ai\gui.py", line 623, in runner
+    worker()
+  File "videogenius_ai\gui.py", line 753, in worker
+    request = self._build_request()
+              ^^^^^^^^^^^^^^^^^^^^^
+  File "videogenius_ai\gui.py", line 593, in _build_request
+    raise ValueError("Enter a topic or idea before generating.")
+ValueError: Enter a topic or idea before generating.
+2026-03-18 11:35:24,523 | WARNING | videogenius_ai | Generation attempt 1 failed: ('Connection aborted.', RemoteDisconnected('Remote end closed connection without response'))
+2026-03-18 11:35:26,564 | WARNING | videogenius_ai | Generation attempt 2 failed: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/chat/completions (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+2026-03-18 11:35:28,580 | WARNING | videogenius_ai | Generation attempt 3 failed: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/chat/completions (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+2026-03-18 11:35:28,581 | ERROR | videogenius_ai | Background task failed: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/chat/completions (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+Traceback (most recent call last):
+  File "urllib3\connection.py", line 204, in _new_conn
+  File "urllib3\util\connection.py", line 85, in create_connection
+  File "urllib3\util\connection.py", line 73, in create_connection
+ConnectionRefusedError: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "urllib3\connectionpool.py", line 787, in urlopen
+  File "urllib3\connectionpool.py", line 493, in _make_request
+  File "urllib3\connection.py", line 500, in request
+  File "http\client.py", line 1333, in endheaders
+  File "http\client.py", line 1093, in _send_output
+  File "http\client.py", line 1037, in send
+  File "urllib3\connection.py", line 331, in connect
+  File "urllib3\connection.py", line 219, in _new_conn
+urllib3.exceptions.NewConnectionError: HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "requests\adapters.py", line 667, in send
+  File "urllib3\connectionpool.py", line 841, in urlopen
+  File "urllib3\util\retry.py", line 535, in increment
+urllib3.exceptions.MaxRetryError: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/chat/completions (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "videogenius_ai\gui.py", line 623, in runner
+    worker()
+  File "videogenius_ai\gui.py", line 761, in worker
+    project = self.generator_service.generate(
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "videogenius_ai\generator_service.py", line 216, in generate
+    raise last_error
+  File "videogenius_ai\generator_service.py", line 193, in generate
+    raw_response = client.chat_completion(
+                   ^^^^^^^^^^^^^^^^^^^^^^^
+  File "videogenius_ai\lmstudio_client.py", line 87, in chat_completion
+    response = self._post("/chat/completions", payload)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "videogenius_ai\lmstudio_client.py", line 41, in _post
+    response = requests.post(
+               ^^^^^^^^^^^^^^
+  File "requests\api.py", line 115, in post
+  File "requests\api.py", line 59, in request
+  File "requests\sessions.py", line 589, in request
+  File "requests\sessions.py", line 703, in send
+  File "requests\adapters.py", line 700, in send
+requests.exceptions.ConnectionError: HTTPConnectionPool(host='127.0.0.1', port=1234): Max retries exceeded with url: /v1/chat/completions (Caused by NewConnectionError("HTTPConnection(host='127.0.0.1', port=1234): Failed to establish a new connection: [WinError 10061] No se puede establecer una conexión ya que el equipo de destino denegó expresamente dicha conexión"))
+2026-03-18 11:37:56,741 | WARNING | videogenius_ai | Generation attempt 1 failed: HTTPConnectionPool(host='127.0.0.1', port=1234): Read timed out. (read timeout=120)
+2026-03-18 11:43:11,564 | ERROR | videogenius_ai | Background task failed: main thread is not in main loop
+Traceback (most recent call last):
+  File "D:\OneDrive\Regional\1 pendientes para analisis\proyectospython\videogeniusAI\videogenius_ai\gui.py", line 712, in runner
+    worker()
+  File "D:\OneDrive\Regional\1 pendientes para analisis\proyectospython\videogeniusAI\videogenius_ai\gui.py", line 827, in worker
+    client = self._build_client()
+             ^^^^^^^^^^^^^^^^^^^^
+  File "D:\OneDrive\Regional\1 pendientes para analisis\proyectospython\videogeniusAI\videogenius_ai\gui.py", line 674, in _build_client
+    base_url=self.base_url_var.get().strip(),
+             ^^^^^^^^^^^^^^^^^^^^^^^
+  File "C:\Users\erickson\AppData\Local\Programs\Python\Python312\Lib\tkinter\__init__.py", line 569, in get
+    value = self._tk.globalgetvar(self._name)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+RuntimeError: main thread is not in main loop

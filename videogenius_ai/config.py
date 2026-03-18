@@ -13,6 +13,7 @@ from .version import DISPLAY_VERSION
 @dataclass
 class AppConfig:
     app_version: str = DISPLAY_VERSION
+    appearance_mode: str = "dark"
     lmstudio_base_url: str = "http://127.0.0.1:1234"
     model: str = ""
     api_key: str = ""
@@ -97,4 +98,3 @@ class ConfigManager:
         if not configured.is_absolute():
             configured = self.config_path.parent / configured
         return str(configured.resolve())
-

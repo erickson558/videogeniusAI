@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from videogenius_ai.config import ConfigManager
 from videogenius_ai.export_service import ExportService
 from videogenius_ai.generator_service import SceneGeneratorService
 from videogenius_ai.models import GenerationRequest
@@ -90,6 +91,17 @@ class ExportTests(unittest.TestCase):
             self.assertTrue(Path(json_file).exists())
             self.assertTrue(Path(txt_file).exists())
             self.assertTrue(Path(csv_file).exists())
+
+
+class ConfigTests(unittest.TestCase):
+    def test_config_persists_appearance_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            manager = ConfigManager(config_path=config_path)
+            manager.update(appearance_mode="dark", output_dir=str(Path(temp_dir) / "output"))
+
+            reloaded = ConfigManager(config_path=config_path)
+            self.assertEqual(reloaded.config.appearance_mode, "dark")
 
 
 if __name__ == "__main__":

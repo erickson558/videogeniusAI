@@ -1,0 +1,74 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests
+        shell: pwsh
+        run: python -m unittest discover -s tests -v
+
+      - name: Read app version
+        id: version
+        shell: pwsh
+        run: |
+          $version = @'
+          from pathlib import Path
+          import re
+
+          content = Path("videogenius_ai/version.py").read_text(encoding="utf-8")
+          match = re.search(r'APP_VERSION = "(\d+\.\d+\.\d+)"', content)
+          if not match:
+              raise SystemExit("APP_VERSION not found")
+          print(match.group(1))
+          '@ | python -
+          "app_version=$version" >> $env:GITHUB_OUTPUT
+          "release_tag=v$version" >> $env:GITHUB_OUTPUT
+
+      - name: Build executable
+        shell: pwsh
+        run: powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
+
+      - name: Create version tag if missing
+        shell: pwsh
+        run: |
+          $tag = "${{ steps.version.outputs.release_tag }}"
+          git fetch --tags
+          if (-not (git tag --list $tag)) {
+            git tag $tag $env:GITHUB_SHA
+            git push origin "refs/tags/$tag"
+          }
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.release_tag }}
+          name: VideoGeniusAI V${{ steps.version.outputs.app_version }}
+          generate_release_notes: true
+          files: |
+            videogeniusAI.exe
