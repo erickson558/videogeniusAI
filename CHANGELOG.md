@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.0.13 - 2026-03-19
+
+- Added one-click full video preparation with automatic LM Studio and ComfyUI startup attempts.
+- Added safe local fallbacks so full video generation can continue when LM Studio or ComfyUI are unavailable.
+- Updated the documentation to describe the zero-touch flow for end users.
+
 ## V0.0.12 - 2026-03-19
 
 - Hardened LM Studio JSON generation and timeout guidance for local reasoning models.

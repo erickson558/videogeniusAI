@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
@@ -13,6 +14,7 @@ import requests
 
 from .comfyui_client import ComfyUIClient
 from .config import AppConfig
+from .lmstudio_client import LMStudioClient
 from .paths import APP_ROOT, RUNTIME_DIR, WORKFLOWS_DIR
 
 CREATE_NO_WINDOW = 0x08000000
@@ -165,6 +167,13 @@ class SetupManager:
         )
         return (result.stdout or result.stderr or PACKAGE_LABELS.get(package_id, package_id)).strip()
 
+    def ensure_package_installed(self, package_id: str, *, install_missing: bool = True) -> bool:
+        if self._package_installed(package_id):
+            return True
+        if install_missing and self.winget_available():
+            self.install_package(package_id)
+        return self._package_installed(package_id)
+
     def _search_for_executable(self, filename: str, roots: list[Path]) -> str:
         for root in roots:
             if not root.exists():
@@ -225,6 +234,17 @@ class SetupManager:
             return False
         os.startfile(executable)  # type: ignore[attr-defined]
         return True
+
+    def ensure_ffmpeg_ready(self, configured_path: str = "", *, install_missing: bool = True) -> str:
+        ffmpeg_path = self.resolve_ffmpeg_path(configured_path)
+        ffprobe_path = self.resolve_ffprobe_path(ffmpeg_path)
+        if ffmpeg_path and ffprobe_path:
+            return ffmpeg_path
+        if install_missing:
+            self.ensure_package_installed(FFMPEG_PACKAGE_ID, install_missing=True)
+        ffmpeg_path = self.resolve_ffmpeg_path(configured_path)
+        ffprobe_path = self.resolve_ffprobe_path(ffmpeg_path)
+        return ffmpeg_path if ffmpeg_path and ffprobe_path else ""
 
     def detect_gpu_names(self) -> list[str]:
         names: list[str] = []
@@ -456,6 +476,58 @@ class SetupManager:
             return success
         except Exception:
             return False
+
+    def wait_for_lmstudio(
+        self,
+        base_url: str,
+        *,
+        timeout_seconds: int = 90,
+        poll_interval_seconds: int = 2,
+    ) -> tuple[bool, list[str], str]:
+        timeout = max(5, int(timeout_seconds))
+        interval = max(1.0, float(poll_interval_seconds))
+        deadline = time.monotonic() + timeout
+        client = LMStudioClient(base_url=base_url, timeout_seconds=min(20, timeout))
+        last_message = "LM Studio is not ready yet."
+
+        while time.monotonic() < deadline:
+            try:
+                success, models, message = client.test_connection()
+            except Exception as exc:
+                success, models, message = False, [], str(exc)
+            last_message = message
+            if success:
+                return True, models, message
+            time.sleep(interval)
+
+        return False, [], last_message
+
+    def wait_for_comfyui(
+        self,
+        configured_url: str,
+        *,
+        timeout_seconds: int = 120,
+        poll_interval_seconds: int = 2,
+        require_checkpoints: bool = False,
+    ) -> tuple[bool, str, list[str], str]:
+        timeout = max(5, int(timeout_seconds))
+        interval = max(1.0, float(poll_interval_seconds))
+        deadline = time.monotonic() + timeout
+        last_url = configured_url.strip().rstrip("/")
+        last_message = "ComfyUI is not ready yet."
+
+        while time.monotonic() < deadline:
+            resolved_url = self.resolve_comfyui_base_url(last_url or configured_url)
+            if resolved_url:
+                last_url = resolved_url
+            if last_url and self._comfyui_reachable(last_url):
+                checkpoints = self._load_checkpoints(last_url)
+                if not require_checkpoints or checkpoints:
+                    return True, last_url, checkpoints, "Connected successfully to ComfyUI."
+                last_message = "ComfyUI responded, but no checkpoints were detected yet."
+            time.sleep(interval)
+
+        return False, last_url, [], last_message
 
     def resolve_comfyui_base_url(self, configured_url: str) -> str:
         for candidate in self._candidate_comfyui_urls(configured_url):

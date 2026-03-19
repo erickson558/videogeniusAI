@@ -16,12 +16,17 @@ The app helps you move from an idea to a production-ready deliverable:
 3. Export the project to JSON, TXT, or CSV.
 4. Render a local MP4 with either storyboard frames or ComfyUI-generated scene assets.
 
+The primary UX goal is a one-click flow for end users: write the prompt, click `Generar video completo`, and let the app prepare the environment automatically.
+
 ## Main capabilities
 
 - Modern desktop UI built with `CustomTkinter`
 - LM Studio connection testing and model discovery
 - Structured JSON generation with retries and validation
 - Automatic cleanup of reasoning-style `<think>` sections before JSON parsing
+- Automatic one-click preparation for FFmpeg, LM Studio, and ComfyUI when possible
+- Safe fallback project generation when LM Studio is unavailable
+- Safe fallback to `Storyboard local` when `Local AI video` is not ready in time
 - Local setup helpers for LM Studio, ComfyUI Desktop, and FFmpeg
 - Automatic ComfyUI port discovery on common local endpoints
 - Support for multiple ComfyUI workers across ports
@@ -75,6 +80,8 @@ The app creates local runtime files such as `config.json`, `log.txt`, `history/`
 3. Write your prompt in `Project brief`.
 4. Choose the generation mode and render backend.
 5. Click `Generar video completo`.
+
+If local AI services are missing or still starting up, the app now attempts to prepare them automatically and can still complete the video through a local fallback path instead of failing immediately.
 
 Recommended LM Studio model guidance:
 

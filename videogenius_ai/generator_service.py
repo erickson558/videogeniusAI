@@ -17,6 +17,78 @@ class SceneGeneratorService:
     def __init__(self) -> None:
         self.logger = LOGGER
 
+    def _fallback_language_pack(self, output_language: str) -> dict[str, str | list[str]]:
+        normalized = (output_language or "").strip().lower()
+        if normalized.startswith("es"):
+            return {
+                "title_prefix": "Video sobre",
+                "summary_prefix": "Resumen automatizado sobre",
+                "script": "Introduccion, desarrollo y cierre con llamado a la accion.",
+                "structure": "Hook / desarrollo / cierre",
+                "scene_titles": ["Gancho", "Contexto", "Desarrollo", "Detalle", "Cierre", "CTA"],
+                "description_prefix": "Escena",
+                "narration_prefix": "En esta escena",
+                "transition": "Corte suave",
+            }
+        return {
+            "title_prefix": "Video about",
+            "summary_prefix": "Automatic summary about",
+            "script": "Introduction, development, and closing with a call to action.",
+            "structure": "Hook / development / close",
+            "scene_titles": ["Hook", "Context", "Development", "Detail", "Close", "CTA"],
+            "description_prefix": "Scene",
+            "narration_prefix": "In this scene",
+            "transition": "Smooth cut",
+        }
+
+    def generate_fallback_project(self, request: GenerationRequest) -> VideoProject:
+        pack = self._fallback_language_pack(request.output_language)
+        scene_titles = pack["scene_titles"]
+        assert isinstance(scene_titles, list)
+
+        scenes: list[dict[str, Any]] = []
+        default_duration = max(1, request.total_duration_seconds // max(1, request.scene_count))
+        topic_excerpt = request.topic.strip().replace("\n", " ")
+        short_topic = topic_excerpt[:120] or "your idea"
+
+        for index in range(request.scene_count):
+            title = str(scene_titles[min(index, len(scene_titles) - 1)])
+            description = (
+                f"{pack['description_prefix']} {index + 1} focused on {short_topic}. "
+                f"Keep the tone {request.narrative_tone.lower()} and adapt it for {request.audience.lower()}."
+            )
+            narration = (
+                f"{pack['narration_prefix']} {index + 1}, present a clear part of {short_topic} "
+                f"for a {request.video_format} in {request.output_language}."
+            )
+            visual_prompt = (
+                f"{request.visual_style}, {request.video_format}, scene {index + 1}, {short_topic}, "
+                f"cinematic composition, high detail"
+            )
+            scenes.append(
+                {
+                    "scene_number": index + 1,
+                    "scene_title": title,
+                    "description": description,
+                    "visual_description": description,
+                    "visual_prompt": visual_prompt,
+                    "narration": narration,
+                    "duration_seconds": default_duration,
+                    "transition": str(pack["transition"]),
+                }
+            )
+
+        payload = {
+            "title": f"{pack['title_prefix']} {short_topic[:60]}",
+            "summary": f"{pack['summary_prefix']} {short_topic}.",
+            "general_script": str(pack["script"]),
+            "structure": str(pack["structure"]),
+            "scenes": scenes,
+        }
+        project = self.normalize_project(payload, request, raw_response='{"source":"local-fallback"}')
+        self.logger.warning("Using local fallback project generation because LM Studio was unavailable.")
+        return project
+
     def build_messages(self, request: GenerationRequest, previous_response: str = "") -> list[dict[str, str]]:
         schema = {
             "title": "string",

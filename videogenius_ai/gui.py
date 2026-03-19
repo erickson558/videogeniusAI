@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 import queue
@@ -22,7 +23,7 @@ from .lmstudio_client import LMStudioClient
 from .logging_utils import configure_logging
 from .models import GenerationRequest, VideoProject, VideoRenderRequest
 from .paths import APP_ROOT
-from .setup_manager import SetupManager
+from .setup_manager import COMFYUI_PACKAGE_ID, LM_STUDIO_PACKAGE_ID, SetupManager
 from .version import APP_NAME, DISPLAY_VERSION
 from .video_render_service import VideoRenderService
 
@@ -1126,6 +1127,163 @@ class VideoGeniusApp(ctk.CTk):
             piper_model_path=options["piper_model_path"],
         )
 
+    def _build_runtime_config_snapshot(self, render_settings: dict[str, Any]) -> AppConfig:
+        return replace(
+            self.app_config,
+            lmstudio_base_url=self.base_url_var.get().strip() or "http://127.0.0.1:1234",
+            model=self.model_var.get().strip(),
+            video_provider=render_settings["provider"],
+            video_aspect_ratio=render_settings["aspect_ratio"],
+            render_captions=bool(render_settings["render_captions"]),
+            comfyui_base_url=render_settings["comfyui_base_url"],
+            comfyui_worker_urls=render_settings["comfyui_worker_urls"],
+            parallel_scene_workers=self._safe_positive_int(str(render_settings["parallel_scene_workers"]), 1),
+            comfyui_checkpoint=render_settings["comfyui_checkpoint"],
+            comfyui_workflow_path=render_settings["comfyui_workflow_path"],
+            comfyui_negative_prompt=render_settings["comfyui_negative_prompt"],
+            comfyui_poll_interval_seconds=self._safe_positive_int(str(render_settings["comfyui_poll_interval_seconds"]), 2),
+            tts_backend=render_settings["tts_backend"],
+            ffmpeg_path=render_settings["ffmpeg_path"],
+            piper_executable_path=render_settings["piper_executable_path"],
+            piper_model_path=render_settings["piper_model_path"],
+            request_timeout_seconds=self._safe_positive_int(self.timeout_var.get(), 120),
+        )
+
+    def _persist_runtime_updates(
+        self,
+        render_settings: dict[str, Any],
+        updates: dict[str, Any],
+        *,
+        message: str,
+        checkpoints: list[str] | None = None,
+    ) -> None:
+        if not updates:
+            return
+        self.config_manager.update(**updates)
+        self.app_config = self.config_manager.config
+        key_map = {
+            "video_provider": "provider",
+            "ffmpeg_path": "ffmpeg_path",
+            "comfyui_base_url": "comfyui_base_url",
+            "comfyui_worker_urls": "comfyui_worker_urls",
+            "parallel_scene_workers": "parallel_scene_workers",
+            "comfyui_checkpoint": "comfyui_checkpoint",
+            "comfyui_workflow_path": "comfyui_workflow_path",
+            "comfyui_negative_prompt": "comfyui_negative_prompt",
+            "comfyui_poll_interval_seconds": "comfyui_poll_interval_seconds",
+            "tts_backend": "tts_backend",
+            "piper_executable_path": "piper_executable_path",
+            "piper_model_path": "piper_model_path",
+        }
+        for config_key, render_key in key_map.items():
+            if config_key in updates:
+                render_settings[render_key] = updates[config_key]
+        self._queue_event(
+            "environment",
+            summary="",
+            checkpoints=checkpoints or [],
+            updates=updates,
+            message=message,
+            success=True,
+        )
+
+    def _ensure_lmstudio_ready_for_generation(self, request: GenerationRequest) -> tuple[LMStudioClient, bool, list[str]]:
+        base_url = self.base_url_var.get().strip() or "http://127.0.0.1:1234"
+        client = LMStudioClient(
+            base_url=base_url,
+            api_key=self.api_key_var.get(),
+            timeout_seconds=self._safe_positive_int(self.timeout_var.get(), 120),
+        )
+        success, models, message = self.setup_manager.wait_for_lmstudio(base_url, timeout_seconds=8)
+        if not success:
+            self.setup_manager.ensure_package_installed(LM_STUDIO_PACKAGE_ID, install_missing=True)
+            if self.setup_manager.launch_application("lmstudio"):
+                self._queue_event("progress", value=0.06, message="Opening LM Studio automatically...")
+                success, models, message = self.setup_manager.wait_for_lmstudio(base_url, timeout_seconds=90)
+        if success:
+            self._queue_event("connection", models=models, message=message)
+            if not request.model and models:
+                request.model = models[0]
+        return client, success, models
+
+    def _prepare_render_settings_for_full_video(self, render_settings: dict[str, Any]) -> dict[str, Any]:
+        ffmpeg_path = self.setup_manager.ensure_ffmpeg_ready(render_settings["ffmpeg_path"], install_missing=True)
+        if ffmpeg_path:
+            self._persist_runtime_updates(
+                render_settings,
+                {"ffmpeg_path": ffmpeg_path},
+                message="FFmpeg prepared automatically.",
+            )
+
+        if render_settings["provider"] != "Local AI video":
+            return render_settings
+
+        config_snapshot = self._build_runtime_config_snapshot(render_settings)
+        prep_result = self.setup_manager.prepare_environment(
+            config_snapshot,
+            install_missing=True,
+            install_default_checkpoint=True,
+            progress_callback=lambda value, message: self._queue_event(
+                "progress",
+                value=0.03 + (value * 0.17),
+                message=message,
+            ),
+        )
+        updates = dict(prep_result.updates)
+        if ffmpeg_path:
+            updates["ffmpeg_path"] = ffmpeg_path
+
+        checkpoints = list(prep_result.status.checkpoints)
+        local_ai_ready = prep_result.status.comfyui_reachable and bool(checkpoints or updates.get("comfyui_checkpoint"))
+
+        if not local_ai_ready:
+            self.setup_manager.ensure_package_installed(COMFYUI_PACKAGE_ID, install_missing=True)
+            if self.setup_manager.launch_application("comfyui"):
+                self._queue_event("progress", value=0.19, message="Opening ComfyUI automatically...")
+            ready, resolved_url, detected_checkpoints, _message = self.setup_manager.wait_for_comfyui(
+                str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
+                timeout_seconds=120,
+                require_checkpoints=True,
+            )
+            if ready:
+                local_ai_ready = True
+                checkpoints = detected_checkpoints
+                updates["comfyui_base_url"] = resolved_url
+                worker_urls = self.setup_manager.resolve_comfyui_worker_urls(
+                    str(updates.get("comfyui_worker_urls") or render_settings["comfyui_worker_urls"]),
+                    resolved_url,
+                )
+                updates["comfyui_worker_urls"] = ", ".join(worker_urls)
+                updates["parallel_scene_workers"] = max(1, len(worker_urls))
+                if checkpoints and not updates.get("comfyui_checkpoint"):
+                    updates["comfyui_checkpoint"] = checkpoints[0]
+                if updates.get("comfyui_checkpoint"):
+                    updates["comfyui_workflow_path"] = str(
+                        self.setup_manager.ensure_default_workflow(
+                            checkpoint_name=str(updates["comfyui_checkpoint"]),
+                            aspect_ratio=str(render_settings["aspect_ratio"]),
+                        )
+                    )
+
+        workflow_path = str(updates.get("comfyui_workflow_path") or render_settings["comfyui_workflow_path"]).strip()
+        if not local_ai_ready or not workflow_path:
+            updates["video_provider"] = "Storyboard local"
+            self._persist_runtime_updates(
+                render_settings,
+                updates,
+                message="ComfyUI was not ready. Falling back to Storyboard local automatically.",
+                checkpoints=checkpoints,
+            )
+            return render_settings
+
+        self._persist_runtime_updates(
+            render_settings,
+            updates,
+            message="Environment prepared automatically for full video generation.",
+            checkpoints=checkpoints,
+        )
+        return render_settings
+
     def _queue_event(self, event_type: str, **payload: Any) -> None:
         self.task_queue.put({"type": event_type, **payload})
 
@@ -1469,7 +1627,6 @@ class VideoGeniusApp(ctk.CTk):
 
     def generate_full_video(self) -> None:
         try:
-            client = self._build_client()
             request = self._build_request()
             if request.generation_mode != "Proyecto completo":
                 request.generation_mode = "Proyecto completo"
@@ -1483,35 +1640,93 @@ class VideoGeniusApp(ctk.CTk):
 
         def worker() -> None:
             self._queue_event("progress", value=0.03, message="Preparing full video generation...")
-            if not request.model:
-                models = client.list_models()
-                if not models:
-                    raise ValueError("No model was selected and LM Studio returned no models.")
-                request.model = models[0]
-                self._queue_event("connection", models=models, message=f"Connected successfully. Using {models[0]}.")
+            try:
+                render_settings_local = self._prepare_render_settings_for_full_video(dict(render_settings))
+            except Exception as exc:
+                self.logger.warning("Automatic environment preparation failed, falling back to Storyboard local: %s", exc)
+                render_settings_local = dict(render_settings)
+                render_settings_local["provider"] = "Storyboard local"
+                ffmpeg_path = self.setup_manager.ensure_ffmpeg_ready(render_settings_local["ffmpeg_path"], install_missing=True)
+                if ffmpeg_path:
+                    self._persist_runtime_updates(
+                        render_settings_local,
+                        {"ffmpeg_path": ffmpeg_path, "video_provider": "Storyboard local"},
+                        message="Automatic setup had issues. Continuing with Storyboard local.",
+                    )
+                self._queue_event("progress", value=0.2, message="Automatic setup had issues. Continuing with Storyboard local...")
 
-            project = self.generator_service.generate(
-                client=client,
-                request=request,
-                retry_attempts=retry_attempts,
-                progress_callback=lambda value, message: self._queue_event(
+            client, lmstudio_ready, models = self._ensure_lmstudio_ready_for_generation(request)
+
+            if lmstudio_ready and (request.model or models):
+                if not request.model and models:
+                    request.model = models[0]
+                try:
+                    project = self.generator_service.generate(
+                        client=client,
+                        request=request,
+                        retry_attempts=retry_attempts,
+                        progress_callback=lambda value, message: self._queue_event(
+                            "progress",
+                            value=min(0.55, value * 0.55),
+                            message=message,
+                        ),
+                    )
+                except Exception as exc:
+                    self.logger.warning("LM Studio generation failed, using local fallback project: %s", exc)
+                    self._queue_event(
+                        "progress",
+                        value=0.24,
+                        message="LM Studio was not ready in time. Building the project locally...",
+                    )
+                    project = self.generator_service.generate_fallback_project(request)
+            else:
+                self._queue_event(
                     "progress",
-                    value=min(0.55, value * 0.55),
-                    message=message,
-                ),
-            )
+                    value=0.24,
+                    message="LM Studio is unavailable. Building the project locally...",
+                )
+                project = self.generator_service.generate_fallback_project(request)
+
             history_path = self.history_service.save(project)
             self._queue_event("project", project=project, history_path=history_path, finished=False)
 
-            render_request = self._build_video_render_request_for_project(project, render_settings)
-            result = self.video_render_service.render(
-                render_request,
-                progress_callback=lambda value, message: self._queue_event(
+            render_request = self._build_video_render_request_for_project(project, render_settings_local)
+            try:
+                result = self.video_render_service.render(
+                    render_request,
+                    progress_callback=lambda value, message: self._queue_event(
+                        "progress",
+                        value=0.55 + (value * 0.45),
+                        message=message,
+                    ),
+                )
+            except Exception as exc:
+                if render_request.provider != "Local AI video":
+                    raise
+                self.logger.warning("Local AI render failed, falling back to Storyboard local: %s", exc)
+                self._queue_event(
                     "progress",
-                    value=0.55 + (value * 0.45),
-                    message=message,
-                ),
-            )
+                    value=0.62,
+                    message="Local AI render failed. Continuing with Storyboard local...",
+                )
+                render_settings_local["provider"] = "Storyboard local"
+                ffmpeg_path = self.setup_manager.ensure_ffmpeg_ready(render_settings_local["ffmpeg_path"], install_missing=True)
+                if ffmpeg_path:
+                    render_settings_local["ffmpeg_path"] = ffmpeg_path
+                    self._persist_runtime_updates(
+                        render_settings_local,
+                        {"ffmpeg_path": ffmpeg_path, "video_provider": "Storyboard local"},
+                        message="Local AI render failed. Storyboard local was selected automatically.",
+                    )
+                fallback_request = self._build_video_render_request_for_project(project, render_settings_local)
+                result = self.video_render_service.render(
+                    fallback_request,
+                    progress_callback=lambda value, message: self._queue_event(
+                        "progress",
+                        value=0.55 + (value * 0.45),
+                        message=message,
+                    ),
+                )
             self._queue_event("video", result=result)
 
         self._run_in_background("Generating full video", worker)

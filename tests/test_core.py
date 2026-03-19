@@ -4,6 +4,7 @@ import tempfile
 import unittest
 import os
 from pathlib import Path
+from unittest import mock
 
 from videogenius_ai.comfyui_client import ComfyUIClient, _replace_placeholders
 from videogenius_ai.config import ConfigManager, sanitize_window_geometry
@@ -86,6 +87,27 @@ class GenerationNormalizationTests(unittest.TestCase):
         self.assertEqual(project.title, "Demo video")
         self.assertEqual(len(project.scenes), 3)
         self.assertEqual(sum(scene.duration_seconds for scene in project.scenes), 30)
+
+    def test_generate_fallback_project_respects_scene_count_and_duration(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic="Historia breve sobre robots en una ciudad futurista",
+            visual_style="Cyberpunk",
+            audience="General",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=30,
+            scene_count=3,
+            generation_mode="Proyecto completo",
+            model="",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        project = service.generate_fallback_project(request)
+        self.assertEqual(len(project.scenes), 3)
+        self.assertEqual(sum(scene.duration_seconds for scene in project.scenes), 30)
+        self.assertIn("Historia breve sobre robots", project.title)
 
 
 class ExportTests(unittest.TestCase):
@@ -286,6 +308,29 @@ class LocalVideoSupportTests(unittest.TestCase):
                 os.environ.pop("APPDATA", None)
             else:
                 os.environ["APPDATA"] = previous_appdata
+
+    def test_wait_for_lmstudio_returns_models_when_ready(self) -> None:
+        manager = SetupManager()
+        with mock.patch("videogenius_ai.setup_manager.LMStudioClient.test_connection", return_value=(True, ["model-a"], "ok")):
+            success, models, message = manager.wait_for_lmstudio("http://127.0.0.1:1234", timeout_seconds=1)
+        self.assertTrue(success)
+        self.assertEqual(models, ["model-a"])
+        self.assertEqual(message, "ok")
+
+    def test_wait_for_comfyui_returns_resolved_url_and_checkpoints(self) -> None:
+        manager = SetupManager()
+        manager.resolve_comfyui_base_url = lambda configured_url: "http://127.0.0.1:8000"  # type: ignore[method-assign]
+        manager._comfyui_reachable = lambda base_url: base_url == "http://127.0.0.1:8000"  # type: ignore[method-assign]
+        manager._load_checkpoints = lambda base_url: ["model-a.safetensors"]  # type: ignore[method-assign]
+        success, resolved_url, checkpoints, message = manager.wait_for_comfyui(
+            "http://127.0.0.1:8188",
+            timeout_seconds=1,
+            require_checkpoints=True,
+        )
+        self.assertTrue(success)
+        self.assertEqual(resolved_url, "http://127.0.0.1:8000")
+        self.assertEqual(checkpoints, ["model-a.safetensors"])
+        self.assertIn("Connected successfully", message)
 
 
 if __name__ == "__main__":
