@@ -8,6 +8,8 @@ build/
 dist/
 *.log
 *.tmp
+config.json
+log.txt
 history/
 output/
 temp/

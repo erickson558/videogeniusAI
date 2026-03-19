@@ -26,8 +26,21 @@ def strip_markdown_fences(text: str) -> str:
     return body
 
 
-def extract_json_candidate(text: str) -> str:
+def strip_reasoning_sections(text: str) -> str:
     body = strip_markdown_fences(text)
+    body = re.sub(r"<think>.*?</think>", "", body, flags=re.IGNORECASE | re.DOTALL).strip()
+
+    if "<think>" in body.lower():
+        start_positions = [index for index in (body.find("{"), body.find("[")) if index != -1]
+        if start_positions:
+            body = body[min(start_positions) :].strip()
+        else:
+            body = body.replace("<think>", "").replace("</think>", "").strip()
+    return body
+
+
+def extract_json_candidate(text: str) -> str:
+    body = strip_reasoning_sections(text)
 
     if body.startswith("{") and body.endswith("}"):
         return body
@@ -85,4 +98,3 @@ def ensure_directory(path: str | Path) -> Path:
     directory = Path(path)
     directory.mkdir(parents=True, exist_ok=True)
     return directory
-

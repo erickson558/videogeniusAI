@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.0.12 - 2026-03-19
+
+- Hardened LM Studio JSON generation and timeout guidance for local reasoning models.
+- Standardized release versioning, GitHub tagging, and Windows EXE metadata under Vx.y.z.
+- Improved README, manual, contribution guide, and separated runtime from build dependencies.
+
 ## V0.0.11 - 2026-03-18
 
 - Hardened startup so the main window is restored on-screen even when a saved geometry would place it outside the current monitor layout.

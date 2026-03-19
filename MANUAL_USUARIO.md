@@ -2,7 +2,7 @@
 
 ## VideoGeniusAI
 
-Version actual: `V0.0.11`
+Version actual: `V0.0.12`
 
 VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para escribir el proyecto de video y puede producir el MP4 final de dos formas:
 
@@ -11,7 +11,7 @@ VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para
 
 La GUI ahora tiene un flujo rapido llamado `Quick setup` para que escribas el prompt y generes el video completo con un solo boton, y un bloque `Instalacion guiada` para preparar el entorno automaticamente.
 
-La version `V0.0.11` tambien corrige el arranque de la ventana principal cuando una posicion guardada quedaba fuera de pantalla o el inicio del `.exe`/`.pyw` no restauraba bien la GUI.
+La version actual tambien mantiene la ventana visible cuando una posicion guardada queda fuera de pantalla y refuerza la generacion JSON para trabajar mejor con modelos locales de LM Studio.
 
 ## 1. Requisitos antes de usar la app
 
@@ -264,11 +264,21 @@ Solucion:
 3. Activa el servidor
 4. Vuelve a pulsar `Probar conexion`
 
+### Error: `Read timed out` o LM Studio piensa demasiado y no devuelve JSON
+
+Solucion:
+
+1. Verifica que el modelo este completamente cargado en LM Studio
+2. Prefiere modelos tipo `chat` o `instruct`
+3. Evita modelos de razonamiento si necesitas JSON estricto
+4. Reduce `Max tokens` si el modelo es lento
+5. Vuelve a pulsar `Probar conexion`
+
 ### Error: la app no aparece en pantalla
 
 Solucion:
 
-1. Usa `V0.0.11` o superior
+1. Usa la version actual o una posterior
 2. Cierra cualquier proceso viejo de la app
 3. Vuelve a abrir la app
 4. Si aun no aparece, renombra o borra `config.json`

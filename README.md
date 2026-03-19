@@ -1,75 +1,55 @@
 # VideoGeniusAI
 
-VideoGeniusAI is a desktop app in Python for turning an idea into a structured video project using LM Studio as a local OpenAI-compatible backend.
+VideoGeniusAI is a Windows desktop application built in Python that turns a prompt into a structured short-form video project and can render the final MP4 locally.
 
-## Main features
+It uses `LM Studio` as a local OpenAI-compatible text backend and supports two video pipelines:
+
+- `Storyboard local` for fast frame-based previews
+- `Local AI video` for scene generation through `ComfyUI`, narration with `Windows local` or `Piper local`, and final assembly with `FFmpeg`
+
+## What the program does
+
+The app helps you move from an idea to a production-ready deliverable:
+
+1. Generate a structured JSON project with title, summary, script, scenes, narration, visual prompts, and timing.
+2. Review the result in the desktop UI.
+3. Export the project to JSON, TXT, or CSV.
+4. Render a local MP4 with either storyboard frames or ComfyUI-generated scene assets.
+
+## Main capabilities
 
 - Modern desktop UI built with `CustomTkinter`
-- Persistent light/dark/system theme with a dedicated toggle in the UI
-- Non-blocking generation flow so the UI stays responsive
-- LM Studio connection test and model discovery
+- LM Studio connection testing and model discovery
 - Structured JSON generation with retries and validation
-- Output modes:
-  - Script only
-  - Script + visual prompts
-  - Full video project
-- Project history
-- Export to JSON, TXT and CSV
-- Local storyboard frame rendering
-- Optional MP4 assembly with FFmpeg
-- Guided local setup for LM Studio, ComfyUI Desktop, and FFmpeg
-- Shared ComfyUI models folder plus automatic `extra_models_config.yaml` wiring
-- One-click installation of a recommended base ComfyUI checkpoint
-- GPU detection plus multi-worker ComfyUI discovery on common local ports
-- Richer video progress feedback with percentage and current render phase
-- Startup-safe window restore so the GUI comes back on-screen after monitor/layout changes
-- Optional local AI rendering through ComfyUI plus built-in Windows narration or optional Piper narration
-- Simplified quick flow with a single end-to-end `Generar video completo` action
-- Persistent `config.json`, window position memory and auto-save
-- `log.txt` logging with timestamps
-- Version visible in the UI
-
-## Project structure
-
-```text
-videogeniusAI/
-|-- videogeniusAI.pyw
-|-- config.json
-|-- requirements.txt
-|-- build_exe.ps1
-|-- videogenius_ai/
-|   |-- config.py
-|   |-- export_service.py
-|   |-- generator_service.py
-|   |-- gui.py
-|   |-- history_service.py
-|   |-- lmstudio_client.py
-|   |-- logging_utils.py
-|   |-- models.py
-|   |-- paths.py
-|   |-- setup_manager.py
-|   |-- tts_service.py
-|   |-- version.py
-|   |-- video_render_service.py
-|   `-- video_service.py
-`-- tests/
-```
+- Automatic cleanup of reasoning-style `<think>` sections before JSON parsing
+- Local setup helpers for LM Studio, ComfyUI Desktop, and FFmpeg
+- Automatic ComfyUI port discovery on common local endpoints
+- Support for multiple ComfyUI workers across ports
+- Optional subtitle burning and local narration
+- Persistent local configuration and history next to the app
+- Version shown inside the UI with release-aligned `Vx.y.z` format
 
 ## Requirements
 
 - Windows
 - Python 3.12+
 - LM Studio running locally with an OpenAI-compatible server enabled
-- The app can now prepare LM Studio, ComfyUI Desktop and FFmpeg automatically on Windows through the guided setup card
-- ComfyUI running locally if you want local AI-generated scene visuals
-- Piper installed locally only if you explicitly choose `Piper local`
+- FFmpeg available locally for MP4 generation
+- ComfyUI running locally if you want `Local AI video`
+- Piper installed only if you choose `Piper local`
 
 ## Dependencies
 
-- `customtkinter` for the desktop interface
-- `requests` for LM Studio HTTP calls
-- `Pillow` for storyboard image generation
-- `PyInstaller` for Windows packaging
+Runtime dependencies are pinned in `requirements.txt`:
+
+- `customtkinter`
+- `Pillow`
+- `requests`
+
+Build dependencies are pinned in `requirements-dev.txt`:
+
+- everything from `requirements.txt`
+- `PyInstaller`
 
 ## Installation
 
@@ -77,112 +57,122 @@ videogeniusAI/
 python -m venv .venv
 .venv\Scripts\Activate.ps1
 python -m pip install --upgrade pip
-pip install -r requirements.txt
+pip install -r requirements-dev.txt
 ```
 
-## Run
-
-Double-click `videogeniusAI.pyw` or run:
+## Run the app
 
 ```powershell
 pythonw .\videogeniusAI.pyw
 ```
 
-## User manual
+The app creates local runtime files such as `config.json`, `log.txt`, `history/`, `output/`, and generated media next to the executable or source tree. Those files are intentionally not tracked in Git.
 
-Detailed usage instructions are available in [MANUAL_USUARIO.md](MANUAL_USUARIO.md).
+## Quick start
 
-## Video backends
+1. Start `LM Studio` and enable the local server.
+2. Run `VideoGeniusAI`.
+3. Write your prompt in `Project brief`.
+4. Choose the generation mode and render backend.
+5. Click `Generar video completo`.
 
-The app now supports two final video backends:
+Recommended LM Studio model guidance:
 
-- `Storyboard local`: create PNG storyboard frames and assemble them into an MP4 locally with FFmpeg.
-- `Local AI video`: generate a local scene asset through ComfyUI for each scene, synthesize narration with `Windows local` by default or `Piper local` optionally, and assemble the final MP4 with FFmpeg. The guided setup now probes common local ComfyUI ports automatically, including Desktop defaults.
-- If multiple ComfyUI workers are available on different local ports, the app can distribute scenes across them to reduce render time.
+- Prefer chat or instruct models for JSON generation.
+- Avoid reasoning-heavy models when strict JSON is required because they may spend too long in internal reasoning or emit non-JSON content first.
 
-Recommended workflow:
+## Local video backends
 
-1. Generate the structured project with LM Studio.
-2. Review the scenes.
-3. Choose the render backend.
-4. Click `Generar video final`.
+### Storyboard local
 
-Quick workflow:
+- Generates one PNG per scene
+- Uses FFmpeg to assemble the final MP4
+- Best for fast previews and low-resource workflows
 
-1. Write the prompt.
-2. Click `Preparar entorno automatico` once.
-3. Choose the essentials in `Quick setup`.
-4. Click `Generar video completo`.
+### Local AI video
 
-## Build EXE
+- Uses ComfyUI to generate a local asset per scene
+- Supports multiple workers across local ports
+- Uses `Windows local` narration by default
+- Supports `Piper local` narration optionally
+- Burns subtitles locally when enabled
+- Uses FFmpeg to assemble the final MP4
+
+## Development
+
+Run the unit tests:
+
+```powershell
+python -m unittest discover -s tests -v
+```
+
+Build the Windows executable:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
-The EXE is generated in the project root and uses the local `.ico`.
+The build script:
 
-## Release automation
+- reads the version from `videogenius_ai/version.py`
+- writes the `.exe` into the project root next to `videogeniusAI.pyw`
+- uses `videogeniusai.ico` from the project root
+- embeds matching Windows executable version metadata
 
-The repository includes a GitHub Actions workflow at `.github/workflows/release.yml`.
+## Versioning and releases
 
-On every push to `main`, the workflow:
+VideoGeniusAI uses semantic versioning with a display format of `Vx.y.z`.
 
-- installs dependencies
-- runs the unit tests
+The single source of truth is:
+
+- `videogenius_ai/version.py`
+
+Use the helper to bump versions:
+
+```powershell
+python .\bump_version.py patch --note "Describe the release"
+```
+
+This updates:
+
+- `videogenius_ai/version.py`
+- `CHANGELOG.md`
+- `MANUAL_USUARIO.md`
+
+GitHub Actions workflow:
+
+- runs on every push to `main`
+- installs development dependencies
+- executes the test suite
 - rebuilds `videogeniusAI.exe`
-- creates or updates the Git tag that matches the app version
-- publishes a GitHub Release with the compiled EXE attached
+- ensures the matching `Vx.y.z` tag exists
+- publishes a GitHub Release with the compiled executable
 
-## Git / versioning workflow
-
-Each commit should bump the patch version:
+## Project structure
 
 ```text
-0.0.1 -> 0.0.2 -> 0.0.3
+videogeniusAI/
+|-- .github/
+|   `-- workflows/
+|-- tests/
+|-- videogenius_ai/
+|-- build_exe.ps1
+|-- bump_version.py
+|-- CONTRIBUTING.md
+|-- MANUAL_USUARIO.md
+|-- README.md
+|-- requirements.txt
+|-- requirements-dev.txt
+|-- videogeniusAI.pyw
+`-- videogeniusai.ico
 ```
 
-The version must stay aligned in:
+## Documentation
 
-- App UI
-- Source code
-- Git tag or release notes
-- GitHub repository state
-- GitHub Release asset metadata
-
-## Example LM Studio prompt contract
-
-The app asks LM Studio to return valid JSON with keys like:
-
-```json
-{
-  "title": "Video title",
-  "summary": "Short summary",
-  "general_script": "Global script",
-  "structure": "High level structure",
-  "scenes": [
-    {
-      "scene_number": 1,
-      "scene_title": "Opening",
-      "description": "What happens",
-      "visual_description": "Shot description",
-      "visual_prompt": "Detailed visual prompt",
-      "narration": "Narration text",
-      "duration_seconds": 8,
-      "transition": "Fade to next scene"
-    }
-  ]
-}
-```
-
-## Security notes
-
-- No `shell=True`
-- FFmpeg is called with argument lists only
-- API keys are optional and never logged
-- Config saves use atomic writes
-- Output file names are sanitized
+- User guide: [MANUAL_USUARIO.md](MANUAL_USUARIO.md)
+- Contribution and release workflow: [CONTRIBUTING.md](CONTRIBUTING.md)
+- Change history: [CHANGELOG.md](CHANGELOG.md)
 
 ## License
 
-Apache License 2.0
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).

@@ -9,6 +9,7 @@ from videogenius_ai.comfyui_client import ComfyUIClient, _replace_placeholders
 from videogenius_ai.config import ConfigManager, sanitize_window_geometry
 from videogenius_ai.export_service import ExportService
 from videogenius_ai.generator_service import SceneGeneratorService
+from videogenius_ai.lmstudio_client import sort_models_for_generation
 from videogenius_ai.setup_manager import SetupManager
 from videogenius_ai.models import GenerationRequest
 from videogenius_ai.video_render_service import VideoRenderService
@@ -20,6 +21,37 @@ class JsonParsingTests(unittest.TestCase):
         raw = """```json\n{"title":"Demo","scenes":[{"scene_number":1}]}\n```"""
         payload = parse_json_payload(raw)
         self.assertEqual(payload["title"], "Demo")
+
+    def test_parse_json_after_reasoning_block(self) -> None:
+        raw = """<think>
+Need to plan the answer first.
+</think>
+{"title":"Demo","scenes":[{"scene_number":1}]}"""
+        payload = parse_json_payload(raw)
+        self.assertEqual(payload["title"], "Demo")
+
+    def test_parse_json_after_unclosed_reasoning_prefix(self) -> None:
+        raw = """<think>
+I should think first.
+{"title":"Demo","scenes":[{"scene_number":1}]}"""
+        payload = parse_json_payload(raw)
+        self.assertEqual(payload["title"], "Demo")
+
+
+class LMStudioModelSelectionTests(unittest.TestCase):
+    def test_sort_models_for_generation_prefers_chat_models_over_reasoning_and_embeddings(self) -> None:
+        models = [
+            "text-embedding-nomic-embed-text-v1.5",
+            "copilot-codellama-7b.gguf",
+            "deepseek/deepseek-r1-0528-qwen3-8b",
+            "google/gemma-3-4b",
+            "openai/gpt-oss-20b",
+        ]
+        ordered = sort_models_for_generation(models)
+        self.assertLess(ordered.index("google/gemma-3-4b"), ordered.index("copilot-codellama-7b.gguf"))
+        self.assertLess(ordered.index("google/gemma-3-4b"), ordered.index("deepseek/deepseek-r1-0528-qwen3-8b"))
+        self.assertLess(ordered.index("openai/gpt-oss-20b"), ordered.index("text-embedding-nomic-embed-text-v1.5"))
+        self.assertEqual(ordered[-1], "text-embedding-nomic-embed-text-v1.5")
 
 
 class GenerationNormalizationTests(unittest.TestCase):

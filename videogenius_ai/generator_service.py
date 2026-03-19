@@ -55,6 +55,7 @@ class SceneGeneratorService:
         system_message = (
             "You are a senior video strategist and storyboard writer. "
             "Return only valid JSON. No markdown. No commentary. "
+            "Do not include reasoning, analysis, or <think> blocks. "
             "Keep scene numbering sequential and durations realistic."
         )
 
@@ -75,6 +76,7 @@ class SceneGeneratorService:
             "- Distribute the total duration across all scenes.\n"
             "- Make scene titles concise.\n"
             "- Make narration ready to read aloud.\n"
+            "- Do not output <think>, analysis, explanations, or markdown fences.\n"
             "- Return strict JSON with this structure:\n"
             f"{json.dumps(schema, ensure_ascii=False, indent=2)}"
         )
