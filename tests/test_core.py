@@ -15,8 +15,9 @@ from videogenius_ai.export_service import ExportService
 from videogenius_ai.generator_service import SceneGeneratorService
 from videogenius_ai.lmstudio_client import sort_models_for_generation
 from videogenius_ai.logging_utils import configure_logging
+from videogenius_ai.prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
 from videogenius_ai.setup_manager import SetupManager
-from videogenius_ai.models import GenerationRequest, RenderedVideoResult
+from videogenius_ai.models import GenerationRequest, RenderedVideoResult, VideoProject
 from videogenius_ai.video_render_service import VideoRenderService
 from videogenius_ai.video_service import StoryboardVideoService
 from videogenius_ai.utils import parse_json_payload
@@ -113,6 +114,93 @@ class GenerationNormalizationTests(unittest.TestCase):
         self.assertEqual(len(project.scenes), 3)
         self.assertEqual(sum(scene.duration_seconds for scene in project.scenes), 30)
         self.assertIn("Historia breve sobre robots", project.title)
+        self.assertTrue(all(scene.shots for scene in project.scenes))
+        self.assertTrue(all(scene.cinematic_intent for scene in project.scenes))
+
+    def test_normalize_project_preserves_shot_plan_and_direction_fields(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic="Tormenta electrica sobre una metropolis futurista",
+            visual_style="Electric cyberpunk",
+            audience="General",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=12,
+            scene_count=1,
+            generation_mode="Proyecto completo",
+            model="model",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        project = service.normalize_project(
+            {
+                "title": "Electric city",
+                "summary": "Summary",
+                "general_script": "Script",
+                "structure": "Hook / payoff",
+                "scenes": [
+                    {
+                        "scene_number": 1,
+                        "scene_title": "Arrival",
+                        "description": "La ciudad despierta",
+                        "visual_description": "Torres y rayos",
+                        "visual_prompt": "Epic electric skyline",
+                        "narration": "La energia corre por toda la ciudad.",
+                        "duration_seconds": 12,
+                        "transition": "Flash cut",
+                        "cinematic_intent": "hacer que la ciudad se sienta enorme",
+                        "camera_language": "wide lens and parallax",
+                        "lighting_style": "neon storm light",
+                        "color_palette": "electric blue and amber",
+                        "energy_level": "charged",
+                        "negative_prompt": "boring sky",
+                        "shots": [
+                            {
+                                "shot_number": 1,
+                                "duration_seconds": 4,
+                                "shot_type": "establishing shot",
+                                "camera_angle": "low angle",
+                                "camera_motion": "slow push-in",
+                                "focal_subject": "torres electricas",
+                                "action": "rayos recorriendo el cielo",
+                                "environment": "metropolis nocturna",
+                                "lighting": "storm glow",
+                                "mood": "awe",
+                                "color_palette": "electric blue",
+                                "visual_prompt": "wide skyline with lightning",
+                            },
+                            {
+                                "shot_number": 2,
+                                "duration_seconds": 8,
+                                "shot_type": "detail shot",
+                                "camera_angle": "close perspective",
+                                "camera_motion": "micro orbit",
+                                "focal_subject": "cables y neon",
+                                "action": "energia fluyendo",
+                                "environment": "calle lluviosa",
+                                "lighting": "neon reflections",
+                                "mood": "kinetic",
+                                "color_palette": "cyan and magenta",
+                                "visual_prompt": "electric street detail",
+                            },
+                        ],
+                    }
+                ],
+            },
+            request,
+            raw_response="{}",
+        )
+        scene = project.scenes[0]
+        self.assertEqual(scene.cinematic_intent, "hacer que la ciudad se sienta enorme")
+        self.assertEqual(scene.camera_language, "wide lens and parallax")
+        self.assertEqual(scene.lighting_style, "neon storm light")
+        self.assertEqual(scene.color_palette, "electric blue and amber")
+        self.assertEqual(scene.energy_level, "charged")
+        self.assertEqual(scene.negative_prompt, "boring sky")
+        self.assertEqual(len(scene.shots), 2)
+        self.assertEqual(scene.shots[0].camera_motion, "slow push-in")
+        self.assertAlmostEqual(sum(shot.duration_seconds for shot in scene.shots), 12.0, places=1)
 
 
 class ExportTests(unittest.TestCase):
@@ -397,9 +485,26 @@ class LocalVideoSupportTests(unittest.TestCase):
         service = StoryboardVideoService()
         project = self._make_project()
         prompt = service._scene_prompt(project, 0, "9:16")  # type: ignore[attr-defined]
-        self.assertIn("vertical 9:16 short-form social video frame", prompt)
+        self.assertIn("vertical 9:16 cinematic composition", prompt)
         self.assertIn("no text overlay", prompt)
         self.assertIn("Planeta gigante", prompt)
+
+    def test_cinematic_prompt_and_negative_prompt_include_directional_details(self) -> None:
+        project = self._make_project()
+        scene = project.scenes[0]
+        prompt = build_cinematic_scene_prompt(project, scene, aspect_ratio="9:16")
+        negative = build_scene_negative_prompt("grainy render", scene.negative_prompt)
+        self.assertIn("premium generative AI artwork", prompt)
+        self.assertIn("dynamic motion energy", prompt)
+        self.assertIn("grainy render", negative)
+        self.assertIn("text overlay", negative)
+
+    def test_video_project_round_trip_restores_shots(self) -> None:
+        project = self._make_project()
+        payload = project.to_dict()
+        restored = VideoProject.from_dict(payload)
+        self.assertEqual(len(restored.scenes), len(project.scenes))
+        self.assertEqual(len(restored.scenes[0].shots), len(project.scenes[0].shots))
 
     def test_storyboard_fallback_frames_respect_requested_size(self) -> None:
         service = StoryboardVideoService()

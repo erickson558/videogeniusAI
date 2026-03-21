@@ -10,6 +10,7 @@ from shutil import which
 from .comfyui_client import ComfyUIClient, detect_workflow_output_mode
 from .logging_utils import configure_logging
 from .models import GeneratedSceneAsset, RenderedVideoResult, VideoRenderRequest
+from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
 from .tts_service import PiperTTSService, WindowsTTSService
 from .utils import now_stamp, sanitize_filename
 
@@ -91,15 +92,17 @@ class LocalAIVideoService:
 
     def _scene_prompt(self, request: VideoRenderRequest, scene_index: int) -> str:
         scene = request.project.scenes[scene_index]
-        visual = scene.visual_prompt or scene.visual_description or scene.description or request.project.visual_style
-        return " | ".join(
-            [
-                request.project.visual_style,
-                request.project.video_format,
-                request.project.output_language,
-                f"Scene {scene.scene_number}",
-                visual,
-            ]
+        return build_cinematic_scene_prompt(
+            request.project,
+            scene,
+            aspect_ratio=request.aspect_ratio,
+        )
+
+    def _scene_negative_prompt(self, request: VideoRenderRequest, scene_index: int) -> str:
+        scene = request.project.scenes[scene_index]
+        return build_scene_negative_prompt(
+            request.comfyui_negative_prompt,
+            scene.negative_prompt,
         )
 
     def _scene_caption(self, request: VideoRenderRequest, scene_index: int) -> str:
@@ -289,7 +292,7 @@ class LocalAIVideoService:
                 asset = client.generate_scene_asset(
                     workflow_path=request.comfyui_workflow_path,
                     prompt_text=self._scene_prompt(request, scene_index),
-                    negative_prompt=request.comfyui_negative_prompt,
+                    negative_prompt=self._scene_negative_prompt(request, scene_index),
                     output_prefix=f"{sanitize_filename(request.project.title)}_scene_{scene.scene_number:02d}",
                     destination_stem=assets_dir / f"scene_{scene.scene_number:02d}",
                     poll_interval_seconds=request.comfyui_poll_interval_seconds,
@@ -394,7 +397,7 @@ class LocalAIVideoService:
             asset = client.generate_scene_asset(
                 workflow_path=request.comfyui_workflow_path,
                 prompt_text=self._scene_prompt(request, index),
-                negative_prompt=request.comfyui_negative_prompt,
+                negative_prompt=self._scene_negative_prompt(request, index),
                 output_prefix=f"{sanitize_filename(request.project.title)}_avatar_scene_{scene.scene_number:02d}",
                 destination_stem=assets_dir / f"avatar_scene_{scene.scene_number:02d}",
                 poll_interval_seconds=request.comfyui_poll_interval_seconds,

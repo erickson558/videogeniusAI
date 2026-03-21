@@ -30,7 +30,11 @@ PACKAGE_LABELS = {
     FFMPEG_PACKAGE_ID: "FFmpeg",
 }
 
-DEFAULT_NEGATIVE_PROMPT = "low quality, blurry, distorted, watermark, logo, extra fingers, deformed face, bad anatomy"
+DEFAULT_NEGATIVE_PROMPT = (
+    "low quality, blurry, distorted, muddy details, washed out colors, flat lighting, "
+    "watermark, logo, text overlay, subtitle box, extra fingers, deformed face, bad anatomy, "
+    "cropped subject, duplicated subject, compression artifacts"
+)
 DEFAULT_CHECKPOINT_FILENAME = "v1-5-pruned-emaonly-fp16.safetensors"
 DEFAULT_CHECKPOINT_URL = "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/v1-5-pruned-emaonly-fp16.safetensors"
 MIN_VALID_CHECKPOINT_BYTES = 512 * 1024 * 1024

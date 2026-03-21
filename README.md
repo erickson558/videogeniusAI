@@ -1,6 +1,6 @@
 # VideoGeniusAI
 
-Current app version: `V0.0.15`
+Current app version: `V0.1.0`
 
 VideoGeniusAI is a Windows desktop application built in Python that turns a prompt into a structured short-form video project and can render the final MP4 locally.
 
@@ -37,6 +37,8 @@ The primary UX goal is a one-click flow for end users: write the prompt, click `
 - Optional subtitle burning and local narration
 - Persistent local configuration and history next to the app
 - Version shown inside the UI with release-aligned `Vx.y.z` format
+- Cinematic shot planning with richer scene direction for faceless AI videos
+- AI-enhanced storyboard rendering that can turn one scene into multiple camera-driven beats
 
 ## Requirements
 
@@ -98,8 +100,10 @@ Recommended LM Studio model guidance:
 ### Storyboard local
 
 - Generates one PNG per scene
-- Uses FFmpeg to assemble the final MP4
-- Best for fast previews and low-resource workflows
+- Can use a ComfyUI image workflow to generate AI stills instead of local fallback cards
+- Turns each scene into multiple cinematic beats when the project includes shot planning
+- Uses FFmpeg to animate and assemble the final MP4
+- Best for fast previews, faceless AI shorts, and low-resource workflows
 
 ### Local AI video
 

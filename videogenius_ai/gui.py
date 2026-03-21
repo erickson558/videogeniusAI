@@ -25,6 +25,7 @@ from .lmstudio_client import LMStudioClient
 from .logging_utils import configure_logging
 from .models import GenerationRequest, VideoProject, VideoRenderRequest
 from .paths import APP_ROOT
+from .prompt_director import summarize_scene_shots
 from .setup_manager import COMFYUI_PACKAGE_ID, LM_STUDIO_PACKAGE_ID, SetupManager
 from .version import APP_NAME, DISPLAY_VERSION
 from .video_render_service import VideoRenderService
@@ -584,7 +585,7 @@ class VideoGeniusApp(ctk.CTk):
         self._make_labeled_combo(lm_card, 12, "Output language", self.language_var, ["Espanol", "English", "Portugues", "Frances"])
         row += 1
 
-        self.local_ai_card = self._make_card(self.sidebar, "Local AI backend", "Needed for Local AI video and Local Avatar video when ComfyUI returns real video or gif clips.")
+        self.local_ai_card = self._make_card(self.sidebar, "Local AI backend", "Use this area for AI-enhanced storyboard visuals, Local AI video clips, or Local Avatar video. Image workflows improve cinematic faceless videos; video workflows are required for full Local AI video.")
         self.local_ai_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
         self._make_labeled_entry(self.local_ai_card, 2, "ComfyUI base URL", self.comfyui_base_url_var)
         self._make_labeled_entry(self.local_ai_card, 4, "ComfyUI worker URLs", self.comfyui_worker_urls_var)
@@ -625,7 +626,7 @@ class VideoGeniusApp(ctk.CTk):
         self.avatar_source_image_button.grid(row=32, column=0, sticky="ew", padx=14, pady=(0, 6))
         ctk.CTkLabel(
             self.local_ai_card,
-            text="Consejo: usa 'Windows local' para voz sin instalar Piper. El workflow automatico que crea la app sirve para imagen estatica, no para video IA real. Para 'Local AI video' selecciona un workflow de ComfyUI que produzca clips o gifs. Para 'Local Avatar video' usa un workflow de lipsync/avatar y una imagen base del avatar. Si eliges una GPU, la app intentara usarla cuando abra ComfyUI automaticamente.",
+            text="Consejo: usa 'Windows local' para voz sin instalar Piper. El workflow automatico de la app sirve para generar imagenes IA cinematicas dentro de 'Storyboard local'. Para 'Local AI video' selecciona un workflow de ComfyUI que produzca clips o gifs. Para 'Local Avatar video' usa un workflow de lipsync/avatar y una imagen base del avatar. Si eliges una GPU, la app intentara usarla cuando abra ComfyUI automaticamente.",
             text_color=ui_color("#94A3B8", "#94A3B8"),
             wraplength=330,
             justify="left",
@@ -913,14 +914,14 @@ class VideoGeniusApp(ctk.CTk):
     def _sync_video_provider_ui(self) -> None:
         provider = self.video_provider_var.get().strip() or "Storyboard local"
         self.render_chip.configure(text=f"Video backend: {provider}")
-        is_local_ai = provider in {"Local AI video", "Local Avatar video"}
+        uses_comfyui_controls = provider in {"Storyboard local", "Local AI video", "Local Avatar video"}
         if hasattr(self, "local_ai_card"):
-            if is_local_ai:
+            if uses_comfyui_controls:
                 self.local_ai_card.grid()
             else:
                 self.local_ai_card.grid_remove()
         if hasattr(self, "local_video_button"):
-            self.local_video_button.configure(state="normal" if is_local_ai and not self.is_busy else "disabled")
+            self.local_video_button.configure(state="normal" if uses_comfyui_controls and not self.is_busy else "disabled")
         self._sync_avatar_ui()
         self._sync_tts_ui()
 
@@ -1724,6 +1725,13 @@ class VideoGeniusApp(ctk.CTk):
                         f"Description: {scene.description}",
                         f"Visual description: {scene.visual_description or '[not requested]'}",
                         f"Visual prompt: {scene.visual_prompt or '[not requested]'}",
+                        f"Cinematic intent: {scene.cinematic_intent or '[auto]'}",
+                        f"Camera language: {scene.camera_language or '[auto]'}",
+                        f"Lighting style: {scene.lighting_style or '[auto]'}",
+                        f"Color palette: {scene.color_palette or '[auto]'}",
+                        f"Energy level: {scene.energy_level or '[auto]'}",
+                        f"Negative prompt: {scene.negative_prompt or '[default cinematic negative prompt]'}",
+                        f"Shots: {summarize_scene_shots(scene) or '[auto-generated]'}",
                         f"Narration: {scene.narration}",
                         f"Duration: {scene.duration_seconds}s",
                         f"Transition: {scene.transition}",
@@ -2102,8 +2110,8 @@ class VideoGeniusApp(ctk.CTk):
                 self._set_status(f"ComfyUI workflow updated: {selected}. Video output detected.", success=True)
             elif workflow_mode == "image":
                 self._set_status(
-                    f"ComfyUI workflow updated: {selected}. Static image output detected; this is not valid for Local AI video or Local Avatar video.",
-                    error=True,
+                    f"ComfyUI workflow updated: {selected}. Static image output detected; this is valid for AI-enhanced Storyboard local, but not for Local AI video or Local Avatar video.",
+                    success=True,
                 )
             else:
                 self._set_status(

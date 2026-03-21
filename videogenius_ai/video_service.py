@@ -10,7 +10,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 from .comfyui_client import ComfyUIClient, detect_workflow_output_mode
 from .logging_utils import configure_logging
-from .models import RenderedVideoResult, VideoProject, VideoRenderRequest
+from .models import RenderedVideoResult, SceneShot, VideoProject, VideoRenderRequest
+from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt, summarize_scene_shots
 from .tts_service import PiperTTSService, WindowsTTSService
 from .utils import now_stamp, sanitize_filename
 
@@ -90,24 +91,50 @@ class StoryboardVideoService:
         )
         return max(0.1, float(result.stdout.strip()))
 
-    def _scene_prompt(self, project: VideoProject, scene_index: int, aspect_ratio: str) -> str:
+    def _scene_prompt(self, project: VideoProject, scene_index: int, aspect_ratio: str, shot: SceneShot | None = None) -> str:
+        return build_cinematic_scene_prompt(
+            project,
+            project.scenes[scene_index],
+            aspect_ratio=aspect_ratio,
+            shot=shot,
+        )
+
+    def _scene_negative_prompt(self, request: VideoRenderRequest, scene_index: int) -> str:
+        scene = request.project.scenes[scene_index]
+        return build_scene_negative_prompt(request.comfyui_negative_prompt, scene.negative_prompt)
+
+    def _scene_shots(self, project: VideoProject, scene_index: int, target_duration: float) -> list[SceneShot]:
         scene = project.scenes[scene_index]
-        visual = scene.visual_prompt or scene.visual_description or scene.description or scene.scene_title or project.title
-        framing_hint = {
-            "9:16": "vertical 9:16 short-form social video frame, full-bleed cinematic composition",
-            "16:9": "widescreen cinematic composition, full frame visual",
-            "1:1": "square social video composition, centered subject",
-        }.get(aspect_ratio, "vertical short-form social video frame")
-        parts = [
-            project.visual_style or "Cinematic",
-            project.video_format or "Short-form social video",
-            framing_hint,
-            f"Scene {scene.scene_number}",
-            scene.scene_title or "Visual scene",
-            visual,
-            "single striking frame, no text overlay, no subtitles, no watermark",
+        source = scene.shots or [
+            SceneShot(
+                shot_number=1,
+                duration_seconds=target_duration,
+                shot_type="hero cinematic shot",
+                camera_angle=scene.camera_language,
+                camera_motion="slow push-in",
+                focal_subject=scene.scene_title or project.title,
+                action=scene.visual_description or scene.description,
+                environment=project.visual_style,
+                lighting=scene.lighting_style,
+                mood=scene.energy_level or project.narrative_tone,
+                color_palette=scene.color_palette,
+                visual_prompt=scene.visual_prompt,
+            )
         ]
-        return " | ".join(part for part in parts if part.strip())
+        shots = [SceneShot.from_dict(shot.to_dict(), index) for index, shot in enumerate(source)]
+        total = sum(max(0.4, shot.duration_seconds) for shot in shots)
+        if total <= 0:
+            even_duration = max(0.8, target_duration / max(1, len(shots)))
+            for shot in shots:
+                shot.duration_seconds = even_duration
+            return shots
+        scale = target_duration / total
+        adjusted = [max(0.4, round(shot.duration_seconds * scale, 2)) for shot in shots]
+        difference = round(target_duration - sum(adjusted), 2)
+        adjusted[-1] = max(0.4, round(adjusted[-1] + difference, 2))
+        for shot, duration in zip(shots, adjusted):
+            shot.duration_seconds = duration
+        return shots
 
     def _scene_caption(self, project: VideoProject, scene_index: int) -> str:
         scene = project.scenes[scene_index]
@@ -280,8 +307,74 @@ class StoryboardVideoService:
             )
         return output_path
 
+    def _finalize_scene_clip(
+        self,
+        *,
+        ffmpeg_path: str,
+        visual_video_path: Path,
+        audio_path: Path | None,
+        target_duration: float,
+        width: int,
+        height: int,
+        subtitle_path: Path | None,
+        output_path: Path,
+    ) -> Path:
+        command = [ffmpeg_path, "-y", "-i", str(visual_video_path)]
+        if audio_path:
+            command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
+        else:
+            command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v:0", "-map", "1:a:0"])
+
+        filters: list[str] = []
+        if subtitle_path:
+            filters.append(self._subtitle_filter(subtitle_path, width, height))
+        if filters:
+            command.extend(["-vf", ",".join(filters)])
+
+        command.extend(
+            [
+                "-t",
+                f"{target_duration:.3f}",
+                "-shortest",
+                "-r",
+                str(SHORTS_FPS),
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-movflags",
+                "+faststart",
+                str(output_path),
+            ]
+        )
+        try:
+            self._run(command)
+        except subprocess.CalledProcessError:
+            if not subtitle_path:
+                raise
+            self.logger.warning("Subtitle burn failed for scene visual %s. Retrying without captions.", visual_video_path)
+            return self._finalize_scene_clip(
+                ffmpeg_path=ffmpeg_path,
+                visual_video_path=visual_video_path,
+                audio_path=audio_path,
+                target_duration=target_duration,
+                width=width,
+                height=height,
+                subtitle_path=None,
+                output_path=output_path,
+            )
+        return output_path
+
     def _write_concat_manifest(self, clip_paths: list[Path], manifest_path: Path) -> None:
-        lines = [f"file '{clip.as_posix()}'" for clip in clip_paths]
+        lines = [f"file '{clip.resolve().as_posix()}'" for clip in clip_paths]
         manifest_path.write_text("\n".join(lines), encoding="utf-8")
 
     def _concat_scene_clips(self, ffmpeg_path: str, clip_paths: list[Path], manifest_path: Path, output_path: Path) -> Path:
@@ -296,14 +389,34 @@ class StoryboardVideoService:
                 "0",
                 "-i",
                 str(manifest_path),
-                "-c",
-                "copy",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "medium",
+                "-crf",
+                "20",
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "160k",
+                "-movflags",
+                "+faststart",
                 str(output_path),
             ]
         )
         return output_path
 
-    def _render_fallback_scene_image(self, project: VideoProject, scene_index: int, size: tuple[int, int], file_path: Path) -> Path:
+    def _render_fallback_scene_image(
+        self,
+        project: VideoProject,
+        scene_index: int,
+        size: tuple[int, int],
+        file_path: Path,
+        *,
+        shot: SceneShot | None = None,
+    ) -> Path:
         width, height = size
         scene = project.scenes[scene_index]
         image = Image.new("RGBA", (width, height), "#0B1220")
@@ -350,7 +463,10 @@ class StoryboardVideoService:
         )
         draw.text((int(width * 0.15), int(height * 0.149)), scene_tag, font=tag_font, fill="#F8FAFC")
 
-        title_text = textwrap.fill(scene.scene_title or project.title or "Short visual", width=max(10, width // 16))
+        title_text = textwrap.fill(
+            shot.focal_subject if shot and shot.focal_subject else (scene.scene_title or project.title or "Short visual"),
+            width=max(10, width // 16),
+        )
         draw.multiline_text(
             (int(width * 0.12), int(height * 0.24)),
             title_text,
@@ -360,7 +476,9 @@ class StoryboardVideoService:
         )
 
         visual_text = textwrap.fill(
-            scene.visual_prompt or scene.visual_description or scene.description or project.summary or "Escena visual",
+            shot.visual_prompt if shot and shot.visual_prompt else (
+                scene.visual_prompt or scene.visual_description or scene.description or project.summary or "Escena visual"
+            ),
             width=max(16, width // 15),
         )
         draw.multiline_text(
@@ -380,7 +498,19 @@ class StoryboardVideoService:
         footer_text = textwrap.fill(self._scene_caption(project, scene_index), width=max(14, width // 16))
         draw.multiline_text(
             (int(width * 0.15), int(height * 0.805)),
-            footer_text,
+            textwrap.fill(
+                " | ".join(
+                    part
+                    for part in [
+                        footer_text,
+                        shot.shot_type if shot else "",
+                        shot.camera_motion if shot else "",
+                        shot.color_palette if shot else "",
+                    ]
+                    if part
+                ),
+                width=max(14, width // 16),
+            ),
             font=caption_font,
             fill="#F8FAFC",
             spacing=6,
@@ -395,7 +525,7 @@ class StoryboardVideoService:
         request: VideoRenderRequest,
         assets_dir: Path,
         progress_callback=None,
-    ) -> dict[int, Path]:
+    ) -> dict[tuple[int, int], Path]:
         workflow_path = request.comfyui_workflow_path.strip()
         if not workflow_path:
             self.logger.info("Storyboard AI visuals unavailable: no workflow path configured.")
@@ -420,23 +550,30 @@ class StoryboardVideoService:
             self.logger.warning("Storyboard AI visuals unavailable: %s", message)
             return {}
 
-        total_scenes = max(1, len(request.project.scenes))
-        width, height = self._dimensions_for_ratio(request.aspect_ratio)
-        ai_visuals: dict[int, Path] = {}
+        scene_shot_index: list[tuple[int, SceneShot]] = []
+        for scene_index, scene in enumerate(request.project.scenes):
+            target_duration = float(max(2, scene.duration_seconds))
+            for shot in self._scene_shots(request.project, scene_index, target_duration):
+                scene_shot_index.append((scene_index, shot))
 
-        for index, scene in enumerate(request.project.scenes):
+        total_shots = max(1, len(scene_shot_index))
+        width, height = self._dimensions_for_ratio(request.aspect_ratio)
+        ai_visuals: dict[tuple[int, int], Path] = {}
+
+        for item_index, (scene_index, shot) in enumerate(scene_shot_index):
+            scene = request.project.scenes[scene_index]
             if progress_callback:
                 progress_callback(
-                    0.06 + ((index / total_scenes) * 0.30),
-                    f"Visual IA {index + 1}/{total_scenes}: generando escena {scene.scene_number}...",
+                    0.06 + ((item_index / total_shots) * 0.30),
+                    f"Visual IA {item_index + 1}/{total_shots}: generando plano {shot.shot_number} de la escena {scene.scene_number}...",
                 )
             try:
                 asset = client.generate_scene_asset(
                     workflow_path=workflow_path,
-                    prompt_text=self._scene_prompt(request.project, index, request.aspect_ratio),
-                    negative_prompt=request.comfyui_negative_prompt,
-                    output_prefix=f"{sanitize_filename(request.project.title)}_storyboard_scene_{scene.scene_number:02d}",
-                    destination_stem=assets_dir / f"scene_{scene.scene_number:02d}",
+                    prompt_text=self._scene_prompt(request.project, scene_index, request.aspect_ratio, shot),
+                    negative_prompt=self._scene_negative_prompt(request, scene_index),
+                    output_prefix=f"{sanitize_filename(request.project.title)}_storyboard_scene_{scene.scene_number:02d}_shot_{shot.shot_number:02d}",
+                    destination_stem=assets_dir / f"scene_{scene.scene_number:02d}_shot_{shot.shot_number:02d}",
                     poll_interval_seconds=request.comfyui_poll_interval_seconds,
                     extra_replacements={
                         "__WIDTH__": width,
@@ -445,22 +582,25 @@ class StoryboardVideoService:
                 )
             except Exception as exc:
                 self.logger.warning(
-                    "Storyboard AI visual failed | scene_number=%s | error=%s",
+                    "Storyboard AI visual failed | scene_number=%s | shot_number=%s | error=%s",
                     scene.scene_number,
+                    shot.shot_number,
                     exc,
                 )
                 continue
             if asset.asset_type != "image":
                 self.logger.warning(
-                    "Storyboard AI visual skipped | scene_number=%s | unexpected_asset_type=%s",
+                    "Storyboard AI visual skipped | scene_number=%s | shot_number=%s | unexpected_asset_type=%s",
                     scene.scene_number,
+                    shot.shot_number,
                     asset.asset_type,
                 )
                 continue
-            ai_visuals[index] = asset.file_path
+            ai_visuals[(scene_index, shot.shot_number)] = asset.file_path
             self.logger.info(
-                "Storyboard AI visual completed | scene_number=%s | file_path=%s",
+                "Storyboard AI visual completed | scene_number=%s | shot_number=%s | file_path=%s",
                 scene.scene_number,
+                shot.shot_number,
                 asset.file_path,
             )
 
@@ -537,8 +677,10 @@ class StoryboardVideoService:
         audio_dir = session_root / "audio"
         subtitle_dir = session_root / "subtitles"
         clips_dir = session_root / "clips"
+        shot_clips_dir = session_root / "shot_clips"
+        scene_visuals_dir = session_root / "scene_visuals"
         fallback_dir = session_root / "fallback_visuals"
-        for directory in [visuals_dir, audio_dir, subtitle_dir, clips_dir, fallback_dir]:
+        for directory in [visuals_dir, audio_dir, subtitle_dir, clips_dir, shot_clips_dir, scene_visuals_dir, fallback_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 
         total_scenes = max(1, len(request.project.scenes))
@@ -565,6 +707,8 @@ class StoryboardVideoService:
             progress_callback=progress_callback,
         )
         clip_paths: list[Path] = []
+        ai_visual_count = 0
+        fallback_visual_count = 0
 
         for index, scene in enumerate(request.project.scenes):
             if progress_callback:
@@ -584,15 +728,6 @@ class StoryboardVideoService:
                 )
                 audio_path = None
 
-            visual_path = provided_visuals.get(index) or ai_visuals.get(index)
-            if visual_path is None:
-                visual_path = self._render_fallback_scene_image(
-                    request.project,
-                    index,
-                    (width, height),
-                    fallback_dir / f"scene_{scene.scene_number:02d}.png",
-                )
-
             duration_seconds = self._media_duration(ffprobe_path, audio_path) if audio_path else float(max(2, scene.duration_seconds))
             subtitle_path: Path | None = None
             if request.render_captions:
@@ -604,17 +739,65 @@ class StoryboardVideoService:
                         subtitle_dir / f"scene_{scene.scene_number:02d}.srt",
                     )
 
-            clip_path = self._build_scene_clip(
-                ffmpeg_path=ffmpeg_path,
-                image_path=visual_path,
-                audio_path=audio_path,
-                target_duration=duration_seconds,
-                width=width,
-                height=height,
-                scene_index=index,
-                subtitle_path=subtitle_path,
-                output_path=clips_dir / f"scene_{scene.scene_number:02d}.mp4",
-            )
+            if provided_visuals:
+                visual_path = provided_visuals[index]
+                clip_path = self._build_scene_clip(
+                    ffmpeg_path=ffmpeg_path,
+                    image_path=visual_path,
+                    audio_path=audio_path,
+                    target_duration=duration_seconds,
+                    width=width,
+                    height=height,
+                    scene_index=index,
+                    subtitle_path=subtitle_path,
+                    output_path=clips_dir / f"scene_{scene.scene_number:02d}.mp4",
+                )
+            else:
+                shot_plan = self._scene_shots(request.project, index, duration_seconds)
+                shot_clip_paths: list[Path] = []
+                for shot_index, shot in enumerate(shot_plan):
+                    visual_path = ai_visuals.get((index, shot.shot_number))
+                    if visual_path is None:
+                        visual_path = self._render_fallback_scene_image(
+                            request.project,
+                            index,
+                            (width, height),
+                            fallback_dir / f"scene_{scene.scene_number:02d}_shot_{shot.shot_number:02d}.png",
+                            shot=shot,
+                        )
+                        fallback_visual_count += 1
+                    else:
+                        ai_visual_count += 1
+                    shot_clip_paths.append(
+                        self._build_scene_clip(
+                            ffmpeg_path=ffmpeg_path,
+                            image_path=visual_path,
+                            audio_path=None,
+                            target_duration=max(0.4, shot.duration_seconds),
+                            width=width,
+                            height=height,
+                            scene_index=index + shot_index,
+                            subtitle_path=None,
+                            output_path=shot_clips_dir / f"scene_{scene.scene_number:02d}_shot_{shot.shot_number:02d}.mp4",
+                        )
+                    )
+
+                scene_visual_path = self._concat_scene_clips(
+                    ffmpeg_path=ffmpeg_path,
+                    clip_paths=shot_clip_paths,
+                    manifest_path=scene_visuals_dir / f"scene_{scene.scene_number:02d}_manifest.txt",
+                    output_path=scene_visuals_dir / f"scene_{scene.scene_number:02d}_visual.mp4",
+                )
+                clip_path = self._finalize_scene_clip(
+                    ffmpeg_path=ffmpeg_path,
+                    visual_video_path=scene_visual_path,
+                    audio_path=audio_path,
+                    target_duration=duration_seconds,
+                    width=width,
+                    height=height,
+                    subtitle_path=subtitle_path,
+                    output_path=clips_dir / f"scene_{scene.scene_number:02d}.mp4",
+                )
             clip_paths.append(clip_path)
 
         if progress_callback:
@@ -629,10 +812,10 @@ class StoryboardVideoService:
         if progress_callback:
             progress_callback(1.0, "Short visual completado.")
         self.logger.info(
-            "Storyboard shorts render completed | output=%s | ai_visual_scenes=%s | fallback_scenes=%s",
+            "Storyboard shorts render completed | output=%s | ai_visuals=%s | fallback_visuals=%s",
             output_path,
-            len(ai_visuals),
-            total_scenes - len(ai_visuals),
+            ai_visual_count if not provided_visuals else 0,
+            fallback_visual_count if not provided_visuals else 0,
         )
         return RenderedVideoResult(
             provider="Storyboard local",
@@ -641,6 +824,6 @@ class StoryboardVideoService:
                 "session_root": str(session_root),
                 "provided_visual_scenes": len(provided_visuals),
                 "ai_visual_scenes": len(ai_visuals),
-                "fallback_scenes": total_scenes - len(ai_visuals) - len(provided_visuals),
+                "fallback_scenes": fallback_visual_count if not provided_visuals else 0,
             },
         )

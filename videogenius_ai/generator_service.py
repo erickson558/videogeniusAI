@@ -5,8 +5,9 @@ from typing import Any, Callable
 
 from .lmstudio_client import LMStudioClient
 from .logging_utils import configure_logging
-from .models import GenerationRequest, Scene, VideoProject
-from .utils import parse_json_payload, safe_int
+from .models import GenerationRequest, Scene, SceneShot, VideoProject
+from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
+from .utils import parse_json_payload, safe_float, safe_int
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -41,6 +42,82 @@ class SceneGeneratorService:
             "transition": "Smooth cut",
         }
 
+    def _fallback_scene_direction(self, request: GenerationRequest, scene_index: int) -> dict[str, str]:
+        lighting_options = [
+            "volumetric golden light with dramatic depth",
+            "electric neon glow with reflective highlights",
+            "storm-lit atmosphere with contrasty clouds",
+            "misty sunrise haze with soft bloom",
+        ]
+        palette_options = [
+            "teal, amber, obsidian black",
+            "electric blue, magenta, chrome",
+            "emerald, cyan, silver",
+            "sunset orange, violet, deep navy",
+        ]
+        camera_options = [
+            "wide cinematic establishing shots with layered depth",
+            "dynamic dolly moves and parallax reveals",
+            "sweeping crane motion with scale emphasis",
+            "immersive orbiting camera language with energy",
+        ]
+        energy_options = ["slow-burn", "rising", "charged", "epic"]
+        intent_options = [
+            "show a world that feels larger than life",
+            "make the visuals feel premium and emotionally immersive",
+            "present the idea with wonder, scale, and vivid atmosphere",
+            "turn the concept into a striking faceless cinematic sequence",
+        ]
+        return {
+            "lighting_style": lighting_options[scene_index % len(lighting_options)],
+            "color_palette": palette_options[scene_index % len(palette_options)],
+            "camera_language": camera_options[scene_index % len(camera_options)],
+            "energy_level": energy_options[scene_index % len(energy_options)],
+            "cinematic_intent": intent_options[scene_index % len(intent_options)],
+        }
+
+    def _fallback_shots_for_scene(
+        self,
+        *,
+        request: GenerationRequest,
+        scene_index: int,
+        scene_title: str,
+        scene_description: str,
+        scene_duration: int,
+    ) -> list[dict[str, Any]]:
+        shot_templates = [
+            ("ultra wide establishing shot", "low angle", "slow push-in"),
+            ("medium cinematic shot", "eye level", "gentle lateral slide"),
+            ("hero detail shot", "close perspective", "micro orbit"),
+            ("scale reveal shot", "high angle", "crane rise"),
+        ]
+        shot_count = 2 if scene_duration <= 4 else 3 if scene_duration <= 10 else 4
+        base_duration = max(0.8, scene_duration / max(1, shot_count))
+        shots: list[dict[str, Any]] = []
+        topic_excerpt = request.topic.strip().replace("\n", " ")[:140]
+        for shot_index in range(shot_count):
+            shot_type, camera_angle, camera_motion = shot_templates[(scene_index + shot_index) % len(shot_templates)]
+            shots.append(
+                {
+                    "shot_number": shot_index + 1,
+                    "duration_seconds": round(base_duration, 2),
+                    "shot_type": shot_type,
+                    "camera_angle": camera_angle,
+                    "camera_motion": camera_motion,
+                    "focal_subject": f"{scene_title} inspired by {topic_excerpt}",
+                    "action": f"visual escalation of {scene_description}",
+                    "environment": f"{request.visual_style} environment for a {request.video_format}",
+                    "lighting": self._fallback_scene_direction(request, scene_index + shot_index)["lighting_style"],
+                    "mood": request.narrative_tone,
+                    "color_palette": self._fallback_scene_direction(request, scene_index + shot_index)["color_palette"],
+                    "visual_prompt": (
+                        f"{request.visual_style}, {scene_title}, {shot_type}, {camera_motion}, "
+                        f"{scene_description}, imaginative environment, premium generative AI look"
+                    ),
+                }
+            )
+        return shots
+
     def generate_fallback_project(self, request: GenerationRequest) -> VideoProject:
         pack = self._fallback_language_pack(request.output_language)
         scene_titles = pack["scene_titles"]
@@ -57,13 +134,14 @@ class SceneGeneratorService:
                 f"{pack['description_prefix']} {index + 1} focused on {short_topic}. "
                 f"Keep the tone {request.narrative_tone.lower()} and adapt it for {request.audience.lower()}."
             )
+            direction = self._fallback_scene_direction(request, index)
             narration = (
                 f"{pack['narration_prefix']} {index + 1}, present a clear part of {short_topic} "
                 f"for a {request.video_format} in {request.output_language}."
             )
             visual_prompt = (
                 f"{request.visual_style}, {request.video_format}, scene {index + 1}, {short_topic}, "
-                f"cinematic composition, high detail"
+                f"cinematic composition, {direction['lighting_style']}, {direction['color_palette']}, high detail"
             )
             scenes.append(
                 {
@@ -75,6 +153,19 @@ class SceneGeneratorService:
                     "narration": narration,
                     "duration_seconds": default_duration,
                     "transition": str(pack["transition"]),
+                    "cinematic_intent": direction["cinematic_intent"],
+                    "camera_language": direction["camera_language"],
+                    "lighting_style": direction["lighting_style"],
+                    "color_palette": direction["color_palette"],
+                    "energy_level": direction["energy_level"],
+                    "negative_prompt": "",
+                    "shots": self._fallback_shots_for_scene(
+                        request=request,
+                        scene_index=index,
+                        scene_title=title,
+                        scene_description=description,
+                        scene_duration=default_duration,
+                    ),
                 }
             )
 
@@ -106,6 +197,28 @@ class SceneGeneratorService:
                     "narration": "string",
                     "duration_seconds": 8,
                     "transition": "string",
+                    "cinematic_intent": "string",
+                    "camera_language": "string",
+                    "lighting_style": "string",
+                    "color_palette": "string",
+                    "energy_level": "string",
+                    "negative_prompt": "string",
+                    "shots": [
+                        {
+                            "shot_number": 1,
+                            "duration_seconds": 2.5,
+                            "shot_type": "string",
+                            "camera_angle": "string",
+                            "camera_motion": "string",
+                            "focal_subject": "string",
+                            "action": "string",
+                            "environment": "string",
+                            "lighting": "string",
+                            "mood": "string",
+                            "color_palette": "string",
+                            "visual_prompt": "string",
+                        }
+                    ],
                 }
             ],
         }
@@ -126,6 +239,7 @@ class SceneGeneratorService:
 
         system_message = (
             "You are a senior video strategist and storyboard writer. "
+            "Think like a cinematic AI film director for faceless, visually rich short videos. "
             "Return only valid JSON. No markdown. No commentary. "
             "Do not include reasoning, analysis, or <think> blocks. "
             "Keep scene numbering sequential and durations realistic."
@@ -148,6 +262,9 @@ class SceneGeneratorService:
             "- Distribute the total duration across all scenes.\n"
             "- Make scene titles concise.\n"
             "- Make narration ready to read aloud.\n"
+            "- For each scene, include cinematic_intent, camera_language, lighting_style, color_palette, energy_level, and negative_prompt.\n"
+            "- Unless the mode is 'Solo guion', include 2 to 4 shots per scene with concrete camera direction and visually imaginative prompts.\n"
+            "- Make the visuals feel premium, vivid, and cinematic instead of generic stock footage.\n"
             "- Do not output <think>, analysis, explanations, or markdown fences.\n"
             "- Return strict JSON with this structure:\n"
             f"{json.dumps(schema, ensure_ascii=False, indent=2)}"
@@ -165,6 +282,74 @@ class SceneGeneratorService:
             {"role": "user", "content": user_message},
         ]
 
+    def _normalize_shot(
+        self,
+        item: dict[str, Any],
+        index: int,
+        default_duration: float,
+    ) -> SceneShot:
+        return SceneShot(
+            shot_number=safe_int(
+                item.get("shot_number") or item.get("number") or item.get("shot"),
+                index + 1,
+            ),
+            duration_seconds=max(
+                0.4,
+                safe_float(item.get("duration_seconds") or item.get("duration"), default_duration),
+            ),
+            shot_type=str(item.get("shot_type") or item.get("framing") or ""),
+            camera_angle=str(item.get("camera_angle") or item.get("angle") or ""),
+            camera_motion=str(item.get("camera_motion") or item.get("motion") or ""),
+            focal_subject=str(item.get("focal_subject") or item.get("subject") or ""),
+            action=str(item.get("action") or item.get("movement") or ""),
+            environment=str(item.get("environment") or item.get("setting") or ""),
+            lighting=str(item.get("lighting") or item.get("lighting_style") or ""),
+            mood=str(item.get("mood") or item.get("emotion") or ""),
+            color_palette=str(item.get("color_palette") or item.get("palette") or ""),
+            visual_prompt=str(item.get("visual_prompt") or item.get("prompt") or ""),
+        )
+
+    def _rebalance_shot_durations(self, shots: list[SceneShot], total_duration: int) -> None:
+        if not shots:
+            return
+
+        current_total = sum(max(0.4, shot.duration_seconds) for shot in shots)
+        if current_total <= 0:
+            even_duration = max(0.8, total_duration / max(1, len(shots)))
+            for shot in shots:
+                shot.duration_seconds = even_duration
+            return
+
+        scale = total_duration / current_total
+        adjusted = [max(0.4, round(shot.duration_seconds * scale, 2)) for shot in shots]
+        difference = round(total_duration - sum(adjusted), 2)
+        adjusted[-1] = max(0.4, round(adjusted[-1] + difference, 2))
+        for shot, duration in zip(shots, adjusted):
+            shot.duration_seconds = duration
+
+    def _normalize_shots(self, item: dict[str, Any], request: GenerationRequest, scene: Scene, index: int) -> list[SceneShot]:
+        raw_shots = item.get("shots") or item.get("shot_plan") or item.get("beats") or []
+        default_duration = max(0.8, scene.duration_seconds / max(1, min(4, max(1, round(scene.duration_seconds / 2.5)))))
+        shots = [
+            self._normalize_shot(shot_item, shot_index, default_duration)
+            for shot_index, shot_item in enumerate(raw_shots)
+            if isinstance(shot_item, dict)
+        ]
+        if request.generation_mode != "Solo guion" and not shots:
+            fallback = self._fallback_shots_for_scene(
+                request=request,
+                scene_index=index,
+                scene_title=scene.scene_title,
+                scene_description=scene.visual_description or scene.description or scene.scene_title,
+                scene_duration=scene.duration_seconds,
+            )
+            shots = [
+                self._normalize_shot(shot_item, shot_index, default_duration)
+                for shot_index, shot_item in enumerate(fallback)
+            ]
+        self._rebalance_shot_durations(shots, scene.duration_seconds)
+        return shots
+
     def _normalize_scene(self, item: dict[str, Any], index: int, default_duration: int, request: GenerationRequest) -> Scene:
         scene = Scene(
             scene_number=safe_int(
@@ -181,11 +366,25 @@ class SceneGeneratorService:
                 safe_int(item.get("duration_seconds") or item.get("duration"), default_duration),
             ),
             transition=str(item.get("transition") or item.get("transition_to_next") or ""),
+            cinematic_intent=str(item.get("cinematic_intent") or item.get("intent") or ""),
+            camera_language=str(item.get("camera_language") or item.get("camera_style") or ""),
+            lighting_style=str(item.get("lighting_style") or item.get("lighting") or ""),
+            color_palette=str(item.get("color_palette") or item.get("palette") or ""),
+            energy_level=str(item.get("energy_level") or item.get("energy") or ""),
+            negative_prompt=str(item.get("negative_prompt") or ""),
         )
+        scene.shots = self._normalize_shots(item, request, scene, index)
 
         if request.generation_mode == "Solo guion":
             scene.visual_description = ""
             scene.visual_prompt = ""
+            scene.cinematic_intent = ""
+            scene.camera_language = ""
+            scene.lighting_style = ""
+            scene.color_palette = ""
+            scene.energy_level = ""
+            scene.negative_prompt = ""
+            scene.shots = []
         return scene
 
     def _rebalance_durations(self, scenes: list[Scene], total_duration: int) -> None:
@@ -240,7 +439,84 @@ class SceneGeneratorService:
             scenes=scenes,
             raw_response=raw_response,
         )
+        self._enrich_project(project)
         return project
+
+    def _enrich_project(self, project: VideoProject) -> None:
+        for index, scene in enumerate(project.scenes):
+            direction = self._fallback_scene_direction(
+                GenerationRequest(
+                    topic=project.source_topic,
+                    visual_style=project.visual_style,
+                    audience=project.audience,
+                    narrative_tone=project.narrative_tone,
+                    video_format=project.video_format,
+                    output_language=project.output_language,
+                    total_duration_seconds=project.estimated_total_duration_seconds,
+                    scene_count=max(1, len(project.scenes)),
+                    generation_mode=project.generation_mode,
+                    model="",
+                    temperature=0.7,
+                    max_tokens=0,
+                ),
+                index,
+            )
+            if project.generation_mode == "Solo guion":
+                scene.shots = []
+                continue
+            if not scene.cinematic_intent:
+                scene.cinematic_intent = direction["cinematic_intent"]
+            if not scene.camera_language:
+                scene.camera_language = direction["camera_language"]
+            if not scene.lighting_style:
+                scene.lighting_style = direction["lighting_style"]
+            if not scene.color_palette:
+                scene.color_palette = direction["color_palette"]
+            if not scene.energy_level:
+                scene.energy_level = direction["energy_level"]
+            if not scene.shots:
+                scene.shots = [
+                    self._normalize_shot(
+                        shot_item,
+                        shot_index,
+                        max(0.8, scene.duration_seconds / 3),
+                    )
+                    for shot_index, shot_item in enumerate(
+                        self._fallback_shots_for_scene(
+                            request=GenerationRequest(
+                                topic=project.source_topic,
+                                visual_style=project.visual_style,
+                                audience=project.audience,
+                                narrative_tone=project.narrative_tone,
+                                video_format=project.video_format,
+                                output_language=project.output_language,
+                                total_duration_seconds=project.estimated_total_duration_seconds,
+                                scene_count=max(1, len(project.scenes)),
+                                generation_mode=project.generation_mode,
+                                model="",
+                                temperature=0.7,
+                                max_tokens=0,
+                            ),
+                            scene_index=index,
+                            scene_title=scene.scene_title,
+                            scene_description=scene.visual_description or scene.description or scene.scene_title,
+                            scene_duration=scene.duration_seconds,
+                        )
+                    )
+                ]
+            self._rebalance_shot_durations(scene.shots, scene.duration_seconds)
+            if not scene.visual_prompt:
+                scene.visual_prompt = build_cinematic_scene_prompt(project, scene, aspect_ratio="9:16")
+            if not scene.negative_prompt:
+                scene.negative_prompt = build_scene_negative_prompt("")
+            for shot in scene.shots:
+                if not shot.visual_prompt:
+                    shot.visual_prompt = build_cinematic_scene_prompt(
+                        project,
+                        scene,
+                        aspect_ratio="9:16",
+                        shot=shot,
+                    )
 
     def generate(
         self,

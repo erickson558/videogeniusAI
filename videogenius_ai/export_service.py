@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 from .models import VideoProject
+from .prompt_director import summarize_scene_shots
 from .utils import now_stamp, sanitize_filename
 
 
@@ -41,6 +42,13 @@ class ExportService:
                     f"Description: {scene.description}",
                     f"Visual description: {scene.visual_description}",
                     f"Visual prompt: {scene.visual_prompt}",
+                    f"Cinematic intent: {scene.cinematic_intent}",
+                    f"Camera language: {scene.camera_language}",
+                    f"Lighting style: {scene.lighting_style}",
+                    f"Color palette: {scene.color_palette}",
+                    f"Energy level: {scene.energy_level}",
+                    f"Negative prompt: {scene.negative_prompt}",
+                    f"Shots: {summarize_scene_shots(scene) or '[auto]'}",
                     f"Narration: {scene.narration}",
                     f"Duration: {scene.duration_seconds}s",
                     f"Transition: {scene.transition}",
@@ -65,6 +73,14 @@ class ExportService:
                     "description",
                     "visual_description",
                     "visual_prompt",
+                    "cinematic_intent",
+                    "camera_language",
+                    "lighting_style",
+                    "color_palette",
+                    "energy_level",
+                    "negative_prompt",
+                    "shot_count",
+                    "shot_summary",
                     "narration",
                     "duration_seconds",
                     "transition",
@@ -72,6 +88,24 @@ class ExportService:
             )
             writer.writeheader()
             for scene in project.scenes:
-                writer.writerow(scene.to_dict())
+                writer.writerow(
+                    {
+                        "scene_number": scene.scene_number,
+                        "scene_title": scene.scene_title,
+                        "description": scene.description,
+                        "visual_description": scene.visual_description,
+                        "visual_prompt": scene.visual_prompt,
+                        "cinematic_intent": scene.cinematic_intent,
+                        "camera_language": scene.camera_language,
+                        "lighting_style": scene.lighting_style,
+                        "color_palette": scene.color_palette,
+                        "energy_level": scene.energy_level,
+                        "negative_prompt": scene.negative_prompt,
+                        "shot_count": len(scene.shots),
+                        "shot_summary": summarize_scene_shots(scene),
+                        "narration": scene.narration,
+                        "duration_seconds": scene.duration_seconds,
+                        "transition": scene.transition,
+                    }
+                )
         return file_path
-

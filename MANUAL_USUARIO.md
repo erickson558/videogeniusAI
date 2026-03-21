@@ -2,7 +2,7 @@
 
 ## VideoGeniusAI
 
-Version actual: `V0.0.15`
+Version actual: `V0.1.0`
 
 VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para escribir el proyecto de video y puede producir el MP4 final de tres formas:
 
@@ -72,6 +72,8 @@ Existen tres modos:
 #### Storyboard local
 
 - crea una imagen `.png` por escena
+- si configuras un workflow de imagen de ComfyUI, puede usar imagenes IA en vez de visuales fallback
+- ahora divide la escena en varios planos cinematograficos cuando el proyecto trae shot planning
 - usa FFmpeg para unirlas
 - produce un `.mp4`
 - sirve como previsualizacion rapida
@@ -188,8 +190,9 @@ Recomendacion:
 ### Opcion A: Storyboard local
 
 1. En `Render backend` elige `Storyboard local`.
-2. Pulsa `Generar video final`.
-3. Abre la carpeta de salida.
+2. Si quieres un resultado mas cercano a video IA faceless, deja configurado un workflow de imagen de ComfyUI en `Workflow JSON path`.
+3. Pulsa `Generar video final`.
+4. Abre la carpeta de salida.
 
 ### Opcion B: Local AI video
 

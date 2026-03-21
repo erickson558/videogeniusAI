@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.1.0 - 2026-03-21
+
+- Added cinematic shot planning and richer AI scene direction for faceless video generation.
+- Storyboard local now renders multi-shot cinematic sequences and can use ComfyUI image workflows for AI-enhanced visuals.
+- Improved local AI prompt quality with stronger cinematic prompts and negative prompt defaults.
+
 ## V0.0.15 - 2026-03-21
 
 - Fixed silent storyboard MP4 generation by routing legacy storyboard builds through the narrated render pipeline.
