@@ -54,6 +54,26 @@ jobs:
           "app_version=$version" >> $env:GITHUB_OUTPUT
           "release_tag=V$version" >> $env:GITHUB_OUTPUT
 
+      - name: Verify version changed on push to main
+        if: ${{ github.event.before != '0000000000000000000000000000000000000000' }}
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin ${{ github.event.before }} --depth 1
+          $previous = git show "${{ github.event.before }}:videogenius_ai/version.py" 2>$null
+          if (-not $previous) {
+            Write-Host "Previous version file not available; skipping strict version comparison."
+            exit 0
+          }
+          $match = [regex]::Match($previous, 'APP_VERSION = "(\d+\.\d+\.\d+)"')
+          if (-not $match.Success) {
+            throw "Could not read APP_VERSION from previous commit."
+          }
+          $previousVersion = $match.Groups[1].Value
+          $currentVersion = "${{ steps.version.outputs.app_version }}"
+          if ($previousVersion -eq $currentVersion) {
+            throw "Version was not bumped. Update videogenius_ai/version.py before pushing to main."
+          }
+
       - name: Build executable
         shell: pwsh
         run: powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
@@ -76,3 +96,5 @@ jobs:
           generate_release_notes: true
           files: |
             videogeniusAI.exe
+            LICENSE
+            NOTICE

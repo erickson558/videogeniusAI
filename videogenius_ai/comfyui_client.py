@@ -13,6 +13,39 @@ import requests
 from .models import GeneratedSceneAsset
 from .utils import sanitize_filename
 
+VIDEO_OUTPUT_CLASS_TYPES = {
+    "SaveAnimatedWEBP",
+    "VHS_VideoCombine",
+    "VideoCombine",
+    "SaveVideo",
+    "SaveWEBM",
+    "SaveGif",
+}
+IMAGE_OUTPUT_CLASS_TYPES = {
+    "SaveImage",
+    "PreviewImage",
+}
+
+
+def detect_workflow_output_mode(workflow_path: str | Path) -> str:
+    path = Path(workflow_path)
+    if not path.exists():
+        raise FileNotFoundError(f"ComfyUI workflow file not found: {path}")
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("The ComfyUI workflow must be a JSON object exported for API usage.")
+
+    class_types = {
+        str(node.get("class_type", "")).strip()
+        for node in payload.values()
+        if isinstance(node, dict)
+    }
+    if class_types & VIDEO_OUTPUT_CLASS_TYPES:
+        return "video"
+    if class_types & IMAGE_OUTPUT_CLASS_TYPES:
+        return "image"
+    return "unknown"
+
 
 def _replace_placeholders(value: Any, replacements: dict[str, Any]) -> Any:
     if isinstance(value, dict):
@@ -109,6 +142,20 @@ class ComfyUIClient:
                 return checkpoints
         return []
 
+    def list_node_types(self) -> list[str]:
+        for path in ("/object_info", "/api/object_info"):
+            try:
+                payload = self._get(path)
+            except requests.RequestException:
+                continue
+            return sorted(str(key).strip() for key in payload.keys() if str(key).strip())
+        return []
+
+    def has_nodes(self, required_node_types: list[str]) -> tuple[bool, list[str]]:
+        available = set(self.list_node_types())
+        missing = [node_type for node_type in required_node_types if node_type not in available]
+        return not missing, missing
+
     def _load_workflow(self, workflow_path: str | Path) -> dict[str, Any]:
         path = Path(workflow_path)
         if not path.exists():
@@ -125,6 +172,7 @@ class ComfyUIClient:
         prompt_text: str,
         negative_prompt: str,
         output_prefix: str,
+        extra_replacements: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         workflow = copy.deepcopy(self._load_workflow(workflow_path))
         seed_value = random.randint(1, 2_147_483_647)
@@ -134,6 +182,8 @@ class ComfyUIClient:
             "__SEED__": seed_value,
             "__OUTPUT_PREFIX__": sanitize_filename(output_prefix),
         }
+        if extra_replacements:
+            replacements.update(extra_replacements)
         return _replace_placeholders(workflow, replacements)
 
     def queue_prompt(
@@ -143,12 +193,14 @@ class ComfyUIClient:
         prompt_text: str,
         negative_prompt: str,
         output_prefix: str,
+        extra_replacements: dict[str, Any] | None = None,
     ) -> str:
         workflow = self._prepare_workflow(
             workflow_path,
             prompt_text=prompt_text,
             negative_prompt=negative_prompt,
             output_prefix=output_prefix,
+            extra_replacements=extra_replacements,
         )
         response = self._post("/prompt", {"prompt": workflow})
         prompt_id = response.get("prompt_id")
@@ -160,6 +212,27 @@ class ComfyUIClient:
         if prompt_id in payload and isinstance(payload[prompt_id], dict):
             return payload[prompt_id]
         return payload
+
+    def _extract_execution_error(self, record: dict[str, Any]) -> str:
+        status = record.get("status")
+        if not isinstance(status, dict):
+            return ""
+        messages = status.get("messages")
+        if not isinstance(messages, list):
+            return ""
+        for entry in messages:
+            if not isinstance(entry, list) or len(entry) < 2:
+                continue
+            event_type, details = entry[0], entry[1]
+            if event_type != "execution_error" or not isinstance(details, dict):
+                continue
+            message = str(details.get("exception_message", "")).strip()
+            node_type = str(details.get("node_type", "")).strip()
+            if message and node_type:
+                return f"ComfyUI execution failed in node '{node_type}': {message}"
+            if message:
+                return f"ComfyUI execution failed: {message}"
+        return ""
 
     def wait_for_completion(
         self,
@@ -174,6 +247,9 @@ class ComfyUIClient:
         while True:
             payload = self._get(f"/history/{prompt_id}")
             record = self._extract_history_record(payload, prompt_id)
+            error_message = self._extract_execution_error(record)
+            if error_message:
+                raise RuntimeError(error_message)
             outputs = record.get("outputs")
             if isinstance(outputs, dict) and outputs:
                 return record
@@ -226,12 +302,14 @@ class ComfyUIClient:
         output_prefix: str,
         destination_stem: str | Path,
         poll_interval_seconds: int = 2,
+        extra_replacements: dict[str, Any] | None = None,
     ) -> GeneratedSceneAsset:
         prompt_id = self.queue_prompt(
             workflow_path,
             prompt_text=prompt_text,
             negative_prompt=negative_prompt,
             output_prefix=output_prefix,
+            extra_replacements=extra_replacements,
         )
         record = self.wait_for_completion(prompt_id, poll_interval_seconds=poll_interval_seconds)
         asset_type, asset_ref = self._extract_asset_reference(record)

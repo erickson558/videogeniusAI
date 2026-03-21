@@ -1,5 +1,18 @@
 # Changelog
 
+## V0.0.15 - 2026-03-21
+
+- Fixed silent storyboard MP4 generation by routing legacy storyboard builds through the narrated render pipeline.
+- Added Local Avatar workflow support, ComfyUI avatar setup guidance, and release/version consistency checks for pushes to main.
+- Prepared ComfyUI Desktop custom node links for EchoMimic and VideoHelperSuite in the local Windows setup.
+- Hardened the Windows build script to compile with a temporary work directory outside OneDrive-locked build folders and aligned release assets with Apache 2.0 documentation.
+
+## V0.0.14 - 2026-03-19
+
+- Added GUI GPU detection and selection for auto-launched ComfyUI renders.
+- Improved rotating logging with module, thread, and task lifecycle context.
+- Added tests for GPU selection and logging configuration.
+
 ## V0.0.13 - 2026-03-19
 
 - Added one-click full video preparation with automatic LM Studio and ComfyUI startup attempts.

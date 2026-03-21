@@ -31,7 +31,7 @@ Use the version helper before creating a release commit:
 python .\bump_version.py patch --note "Short release note"
 ```
 
-The helper updates the single source of truth in `videogenius_ai/version.py` and refreshes the changelog and manual version banner.
+The helper updates the single source of truth in `videogenius_ai/version.py`, refreshes the README version banner, and updates the changelog and manual version banner.
 
 ## Release workflow
 
@@ -45,7 +45,12 @@ Recommended release flow:
 6. Create or push the matching `Vx.y.z` tag if needed.
 7. Push to `main`.
 
-On every push to `main`, GitHub Actions rebuilds the executable, verifies tests, ensures the `Vx.y.z` tag exists, and publishes a GitHub Release.
+On every push to `main`, GitHub Actions verifies that the pushed version changed, rebuilds the executable, ensures the matching `Vx.y.z` tag exists, and publishes a GitHub Release.
+
+Release rule:
+
+- Do not push a commit to `main` without bumping the app version first.
+- Keep one version bump per release commit so the app UI, docs, executable metadata, tag, and GitHub Release stay in sync.
 
 ## Dependencies policy
 
@@ -55,4 +60,4 @@ On every push to `main`, GitHub Actions rebuilds the executable, verifies tests,
 
 ## Local artifacts
 
-`config.json`, `log.txt`, generated media, and built executables are local artifacts and should not be committed.
+`config.json`, `log.txt`, generated media, temporary smoke-test folders, and built executables are local artifacts and should not be committed.

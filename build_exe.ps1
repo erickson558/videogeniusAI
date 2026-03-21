@@ -30,6 +30,9 @@ if ($versionSource -notmatch 'APP_VERSION = "(\d+\.\d+\.\d+)"') {
 $appVersion = $Matches[1]
 $versionParts = $appVersion.Split(".")
 $versionInfoPath = Join-Path $env:TEMP "videogeniusAI_version_info.txt"
+$safeVersion = $appVersion -replace '[^0-9\.]', '_'
+$timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+$workPath = Join-Path $env:TEMP "videogeniusAI_build_${safeVersion}_$timestamp"
 $versionInfo = @"
 VSVersionInfo(
   ffi=FixedFileInfo(
@@ -77,11 +80,12 @@ try {
         --icon $iconPath `
         --version-file $versionInfoPath `
         --distpath $projectRoot `
-        --workpath (Join-Path $projectRoot "build") `
+        --workpath $workPath `
         --specpath $projectRoot `
         $entryPoint
 }
 finally {
     Pop-Location
     Remove-Item -Path $versionInfoPath -ErrorAction SilentlyContinue
+    Remove-Item -Path $workPath -Recurse -Force -ErrorAction SilentlyContinue
 }

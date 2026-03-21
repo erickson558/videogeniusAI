@@ -1,11 +1,14 @@
 # VideoGeniusAI
 
+Current app version: `V0.0.15`
+
 VideoGeniusAI is a Windows desktop application built in Python that turns a prompt into a structured short-form video project and can render the final MP4 locally.
 
-It uses `LM Studio` as a local OpenAI-compatible text backend and supports two video pipelines:
+It uses `LM Studio` as a local OpenAI-compatible text backend and supports three video pipelines:
 
 - `Storyboard local` for fast frame-based previews
-- `Local AI video` for scene generation through `ComfyUI`, narration with `Windows local` or `Piper local`, and final assembly with `FFmpeg`
+- `Local AI video` for real scene clips generated through `ComfyUI` video/gif workflows, narration with `Windows local` or `Piper local`, and final assembly with `FFmpeg`
+- `Local Avatar video` for talking-avatar style clips generated through a ComfyUI avatar/lipsync workflow plus a source image and local narration
 
 ## What the program does
 
@@ -28,6 +31,7 @@ The primary UX goal is a one-click flow for end users: write the prompt, click `
 - Safe fallback project generation when LM Studio is unavailable
 - Safe fallback to `Storyboard local` when `Local AI video` is not ready in time
 - Local setup helpers for LM Studio, ComfyUI Desktop, and FFmpeg
+- GPU detection in the GUI with a selectable GPU for auto-launched `ComfyUI` renders
 - Automatic ComfyUI port discovery on common local endpoints
 - Support for multiple ComfyUI workers across ports
 - Optional subtitle burning and local narration
@@ -41,6 +45,7 @@ The primary UX goal is a one-click flow for end users: write the prompt, click `
 - LM Studio running locally with an OpenAI-compatible server enabled
 - FFmpeg available locally for MP4 generation
 - ComfyUI running locally if you want `Local AI video`
+- `ComfyUI_EchoMimic` plus `ComfyUI-VideoHelperSuite` in ComfyUI `custom_nodes` if you want `Local Avatar video`
 - Piper installed only if you choose `Piper local`
 
 ## Dependencies
@@ -71,7 +76,7 @@ pip install -r requirements-dev.txt
 pythonw .\videogeniusAI.pyw
 ```
 
-The app creates local runtime files such as `config.json`, `log.txt`, `history/`, `output/`, and generated media next to the executable or source tree. Those files are intentionally not tracked in Git.
+The app creates local runtime files such as `config.json`, `log.txt`, `history/`, `output/`, and generated media next to the executable or source tree. `log.txt` rotates automatically and includes timestamps, module names, thread names, and source lines for troubleshooting. Those files are intentionally not tracked in Git.
 
 ## Quick start
 
@@ -98,11 +103,22 @@ Recommended LM Studio model guidance:
 
 ### Local AI video
 
-- Uses ComfyUI to generate a local asset per scene
+- Requires a ComfyUI workflow that outputs real video or gif assets per scene
+- Rejects workflows that only output static images
+- Lets you choose which detected GPU to use when VideoGeniusAI opens ComfyUI automatically
 - Supports multiple workers across local ports
 - Uses `Windows local` narration by default
 - Supports `Piper local` narration optionally
 - Burns subtitles locally when enabled
+- Uses FFmpeg to assemble the final MP4
+
+### Local Avatar video
+
+- Requires a ComfyUI workflow that outputs real video or gif assets
+- Requires an avatar source image
+- Uses local narration audio per scene for lipsync-style workflows
+- Requires the ComfyUI custom nodes exposed as `Echo_LoadModel`, `Echo_Predata`, `Echo_Sampler`, `VHS_LoadAudio`, `VHS_LoadImagePath`, and `VHS_VideoCombine`
+- Rejects workflows that only output static images
 - Uses FFmpeg to assemble the final MP4
 
 ## Development
@@ -126,6 +142,12 @@ The build script:
 - uses `videogeniusai.ico` from the project root
 - embeds matching Windows executable version metadata
 
+## Release discipline
+
+- Treat each commit pushed to `main` as a release commit with a fresh semantic version bump.
+- Keep `videogenius_ai/version.py`, `README.md`, `MANUAL_USUARIO.md`, `CHANGELOG.md`, the Windows executable metadata, and the GitHub tag aligned to the same `Vx.y.z`.
+- Prefer a single release-ready commit per push to `main` so the generated GitHub Release, tag, and executable all map to one exact app version.
+
 ## Versioning and releases
 
 VideoGeniusAI uses semantic versioning with a display format of `Vx.y.z`.
@@ -143,6 +165,7 @@ python .\bump_version.py patch --note "Describe the release"
 This updates:
 
 - `videogenius_ai/version.py`
+- `README.md`
 - `CHANGELOG.md`
 - `MANUAL_USUARIO.md`
 
@@ -153,7 +176,7 @@ GitHub Actions workflow:
 - executes the test suite
 - rebuilds `videogeniusAI.exe`
 - ensures the matching `Vx.y.z` tag exists
-- publishes a GitHub Release with the compiled executable
+- publishes a GitHub Release with the compiled executable plus Apache 2.0 license files
 
 ## Project structure
 
@@ -166,7 +189,9 @@ videogeniusAI/
 |-- build_exe.ps1
 |-- bump_version.py
 |-- CONTRIBUTING.md
+|-- LICENSE
 |-- MANUAL_USUARIO.md
+|-- NOTICE
 |-- README.md
 |-- requirements.txt
 |-- requirements-dev.txt
@@ -182,4 +207,4 @@ videogeniusAI/
 
 ## License
 
-This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).

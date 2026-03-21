@@ -2,12 +2,13 @@
 
 ## VideoGeniusAI
 
-Version actual: `V0.0.13`
+Version actual: `V0.0.15`
 
-VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para escribir el proyecto de video y puede producir el MP4 final de dos formas:
+VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para escribir el proyecto de video y puede producir el MP4 final de tres formas:
 
 - `Storyboard local`
 - `Local AI video` con `ComfyUI + FFmpeg`, voz `Windows local` por defecto y `Piper` opcional
+- `Local Avatar video` con `ComfyUI + EchoMimic + VideoHelperSuite`, imagen base del avatar y narracion local
 
 La GUI ahora tiene un flujo rapido llamado `Quick setup` para que escribas el prompt y generes el video completo con un solo boton, y un bloque `Instalacion guiada` para preparar el entorno automaticamente.
 
@@ -31,6 +32,13 @@ Opcional para modo `Local AI video`:
 - Un modelo visual cargado en ComfyUI
 - Piper instalado si quieres narracion local avanzada
 - Un modelo `.onnx` de Piper si quieres narracion local
+
+Opcional para modo `Local Avatar video`:
+
+- ComfyUI corriendo localmente
+- Los custom nodes `ComfyUI_EchoMimic` y `ComfyUI-VideoHelperSuite`
+- Una imagen base del avatar
+- El VAE `sd-vae-ft-mse.safetensors`
 
 Prueba rapida para FFmpeg:
 
@@ -59,7 +67,7 @@ LM Studio genera:
 
 ### Etapa 2: Video final
 
-Existen dos modos:
+Existen tres modos:
 
 #### Storyboard local
 
@@ -70,17 +78,29 @@ Existen dos modos:
 
 #### Local AI video
 
-- usa ComfyUI para generar una imagen o clip local por escena
+- usa ComfyUI para generar un clip o gif real por escena
+- rechaza workflows que solo generen imagen estatica
 - usa Piper para narracion si lo configuras
 - quema subtitulos locales si activas captions
 - usa FFmpeg para ensamblar el MP4 final
 - muestra porcentaje y fase actual del render en la barra de progreso
+
+#### Local Avatar video
+
+- usa ComfyUI con un workflow de avatar o lipsync
+- necesita una imagen base del avatar
+- usa el audio local de cada escena para conducir el lipsync
+- rechaza workflows que solo generen imagen estatica
+- usa FFmpeg para ensamblar el MP4 final
 
 ### Multi-GPU y rendimiento
 
 - La app detecta las GPUs disponibles de Windows.
 - `LM Studio` maneja su propia configuracion de GPU al cargar el modelo.
 - `ComfyUI` usa una GPU por instancia mediante `CUDA device index`.
+- En `Local AI backend > GPU for Local AI render` puedes elegir la GPU que VideoGeniusAI intentara usar.
+- Esa seleccion se aplica cuando la app abre `ComfyUI` automaticamente.
+- Si `ComfyUI` ya estaba abierto, la GPU activa depende de como fue iniciada esa instancia.
 - Si ejecutas varias instancias de ComfyUI en distintos puertos, la app puede repartir escenas entre todos los workers detectados para acelerar el render.
 
 ## 3. Flujo correcto de uso
@@ -189,31 +209,44 @@ http://127.0.0.1:8188
 3. Pulsa `Preparar entorno automatico`.
 4. La app intentara:
    - detectar el modelo visual de ComfyUI
+   - detectar las GPUs disponibles para que puedas elegir una en la GUI
    - detectar workers de ComfyUI en puertos locales comunes
    - configurar la carpeta compartida de modelos
    - descargar el modelo base recomendado si aun no existe
-   - crear el workflow inicial
+   - crear un workflow inicial de imagen estatica solo como referencia tecnica
    - activar `Windows local` para la narracion
    - detectar FFmpeg
-5. Si tienes varias instancias de ComfyUI:
+5. Si quieres fijar una GPU para el render local:
+   - usa `GPU for Local AI render`
+   - elige `Auto` o una GPU detectada
+   - la app aplicara esa seleccion si necesita abrir `ComfyUI` por ti
+6. Si tienes varias instancias de ComfyUI:
    - agrega las URLs en `ComfyUI worker URLs`
    - ejemplo: `http://127.0.0.1:8000, http://127.0.0.1:8189`
    - deja `Parallel workers` igual al numero de workers detectados
-6. Si quieres evitar basura visual, llena `Negative prompt`.
-7. Si quieres narracion local avanzada:
+7. Si quieres evitar basura visual, llena `Negative prompt`.
+8. Si quieres narracion local avanzada:
    - en `TTS backend` elige `Piper local`
    - llena `Piper executable`
    - llena `Piper model`
-8. Pulsa `Probar ComfyUI`.
-9. Pulsa `Generar video final`.
+9. Pulsa `Probar ComfyUI`.
+10. Pulsa `Generar video final`.
+
+### Opcion C: Local Avatar video
+
+1. En `Render backend` elige `Local Avatar video`.
+2. Usa un workflow JSON de ComfyUI exportado para API que produzca `videos` o `gifs`.
+3. En `Avatar source image` selecciona la imagen base del avatar.
+4. Usa `Windows local` o `Piper local` para que la app genere el audio por escena.
+5. Pulsa `Generar video final`.
 
 ## 5. Workflow de ComfyUI
 
-En la mayoria de los casos ya no necesitas crear el workflow manualmente.
+Para `Local AI video`, normalmente si necesitas un workflow manual.
 
-Si `Preparar entorno automatico` detecta un modelo visual, la app crea el archivo por ti en la carpeta `workflows`.
+Si `Preparar entorno automatico` detecta un modelo visual, la app crea un JSON base en la carpeta `workflows`, pero ese workflow automatico es de imagen estatica y no sirve como video IA real.
 
-Solo necesitas un workflow manual si quieres usar uno personalizado.
+Para `Local AI video` debes usar un workflow personalizado exportado para API que produzca `videos` o `gifs`.
 
 La app espera un workflow JSON exportado para API.
 
@@ -223,6 +256,10 @@ Dentro del workflow puedes usar estos placeholders:
 - `__NEGATIVE_PROMPT__`
 - `__SEED__`
 - `__OUTPUT_PREFIX__`
+- `__SOURCE_IMAGE__`
+- `__AVATAR_IMAGE__`
+- `__AUDIO_FILE__`
+- `__AUDIO_PATH__`
 
 La app reemplaza esos valores automaticamente por cada escena.
 
@@ -258,6 +295,12 @@ En `Local AI video` veras algo como:
 
 20260318_150000_mi_video_local_ai.mp4
 ```
+
+Tambien se escribe `log.txt` junto a la app.
+
+- rota automaticamente para no crecer sin limite
+- incluye fecha, nivel, modulo, hilo y linea de codigo
+- sirve para diagnosticar errores de LM Studio, ComfyUI, FFmpeg y tareas en segundo plano
 
 ## 7. Errores comunes y solucion
 
@@ -305,10 +348,12 @@ Solucion:
 
 1. Confirma cuantas GPUs detecta la app en `Instalacion guiada`
 2. En `LM Studio`, revisa sus controles de carga de GPU
-3. Si quieres acelerar el render IA con ComfyUI, ejecuta una instancia por GPU
-4. Asigna un puerto distinto a cada instancia
-5. Coloca todas las URLs en `ComfyUI worker URLs`
-6. Usa `Parallel workers` igual al numero de instancias activas
+3. En `GPU for Local AI render`, elige una GPU detectada si la app abrira `ComfyUI` automaticamente
+4. Si `ComfyUI` ya estaba abierto, reinicialo con la GPU deseada o deja que VideoGeniusAI lo abra
+5. Si quieres acelerar el render IA con ComfyUI, ejecuta una instancia por GPU
+6. Asigna un puerto distinto a cada instancia
+7. Coloca todas las URLs en `ComfyUI worker URLs`
+8. Usa `Parallel workers` igual al numero de instancias activas
 
 ### Error: no genera el MP4
 

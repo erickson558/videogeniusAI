@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from shutil import which
 from typing import Callable
+from urllib.parse import urlparse
 
 import requests
 
@@ -33,6 +34,21 @@ DEFAULT_NEGATIVE_PROMPT = "low quality, blurry, distorted, watermark, logo, extr
 DEFAULT_CHECKPOINT_FILENAME = "v1-5-pruned-emaonly-fp16.safetensors"
 DEFAULT_CHECKPOINT_URL = "https://huggingface.co/Comfy-Org/stable-diffusion-v1-5-archive/resolve/main/v1-5-pruned-emaonly-fp16.safetensors"
 MIN_VALID_CHECKPOINT_BYTES = 512 * 1024 * 1024
+DEFAULT_AVATAR_VAE_FILENAME = "sd-vae-ft-mse.safetensors"
+DEFAULT_AVATAR_VAE_URL = "https://huggingface.co/stabilityai/sd-vae-ft-mse/resolve/main/diffusion_pytorch_model.safetensors"
+MIN_VALID_AVATAR_VAE_BYTES = 128 * 1024 * 1024
+DEFAULT_COMFYUI_HOST = "127.0.0.1"
+DEFAULT_COMFYUI_PORT = 8000
+AVATAR_REQUIRED_NODE_TYPES = [
+    "Echo_LoadModel",
+    "Echo_Predata",
+    "Echo_Sampler",
+    "VHS_LoadAudio",
+    "VHS_LoadImagePath",
+    "VHS_VideoCombine",
+]
+DESKTOP_SECTION_BEGIN = "# VideoGeniusAI desktop paths begin"
+DESKTOP_SECTION_END = "# VideoGeniusAI desktop paths end"
 MANAGED_SECTION_BEGIN = "# VideoGeniusAI managed models begin"
 MANAGED_SECTION_END = "# VideoGeniusAI managed models end"
 
@@ -93,6 +109,27 @@ class SetupManager:
         self.workflows_dir.mkdir(parents=True, exist_ok=True)
         self.runtime_models_dir = RUNTIME_DIR / "comfyui_models"
         self.runtime_models_dir.mkdir(parents=True, exist_ok=True)
+
+    def _default_programs_dir(self) -> Path:
+        return Path(os.environ.get("LOCALAPPDATA", "")).expanduser() / "Programs"
+
+    def _default_comfyui_install_root(self) -> Path:
+        return self._default_programs_dir() / "ComfyUI"
+
+    def _default_lmstudio_install_root(self) -> Path:
+        return Path(os.environ.get("ProgramFiles", "")).expanduser() / "LM Studio"
+
+    def _known_application_candidates(self, app_name: str) -> list[Path]:
+        normalized = app_name.strip().lower()
+        if normalized == "comfyui":
+            roots = [self._default_comfyui_install_root()]
+            filenames = ["ComfyUI.exe", "ComfyUI Desktop.exe"]
+        elif normalized == "lmstudio":
+            roots = [self._default_lmstudio_install_root(), self._default_programs_dir() / "LM Studio"]
+            filenames = ["LM Studio.exe", "LMStudio.exe"]
+        else:
+            return []
+        return [root / filename for root in roots for filename in filenames]
 
     def _candidate_comfyui_urls(self, configured_url: str) -> list[str]:
         candidates = [
@@ -217,23 +254,219 @@ class SetupManager:
         return self._search_for_executable("ffprobe.exe", self._common_program_roots())
 
     def find_application_path(self, app_name: str) -> str:
+        for candidate in self._known_application_candidates(app_name):
+            if candidate.exists():
+                return str(candidate.resolve())
+
         lookup = {
             "lmstudio": ["LM Studio.exe", "LMStudio.exe"],
             "comfyui": ["ComfyUI.exe", "ComfyUI Desktop.exe"],
         }
-        targets = lookup.get(app_name.lower(), [])
-        for filename in targets:
-            match = self._search_for_executable(filename, self._common_program_roots())
+        roots = [path for path in self._common_program_roots() if path != self._default_programs_dir()]
+        for filename in lookup.get(app_name.lower(), []):
+            match = self._search_for_executable(filename, roots)
             if match:
                 return match
         return ""
 
-    def launch_application(self, app_name: str) -> bool:
+    def format_gpu_options(self, gpu_names: list[str]) -> list[str]:
+        return ["Auto", *[f"GPU {index}: {name}" for index, name in enumerate(gpu_names)]]
+
+    def gpu_index_from_choice(self, choice: str) -> int | None:
+        text = (choice or "").strip()
+        if not text or text.lower() == "auto":
+            return None
+        if not text.lower().startswith("gpu "):
+            return None
+        number_text = text[4:].split(":", 1)[0].strip()
+        try:
+            return int(number_text)
+        except ValueError:
+            return None
+
+    def _comfyui_launch_env(self, gpu_choice: str) -> dict[str, str]:
+        env = os.environ.copy()
+        gpu_index = self.gpu_index_from_choice(gpu_choice)
+        if gpu_index is not None:
+            env["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
+            env["CUDA_VISIBLE_DEVICES"] = str(gpu_index)
+            env["HIP_VISIBLE_DEVICES"] = str(gpu_index)
+            env["ROCR_VISIBLE_DEVICES"] = str(gpu_index)
+        return env
+
+    def _load_comfyui_desktop_config(self) -> dict[str, object]:
+        path = self.comfyui_user_config_dir() / "config.json"
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
+
+    def resolve_comfyui_data_root(self) -> Path:
+        payload = self._load_comfyui_desktop_config()
+        configured_root = str(payload.get("basePath") or "").strip()
+        if configured_root:
+            return Path(configured_root).expanduser().resolve()
+        return (Path.home() / "Documents" / "ComfyUI").resolve()
+
+    def resolve_comfyui_main_script(self) -> str:
+        executable = self.find_application_path("comfyui")
+        candidates: list[Path] = [
+            self._default_comfyui_install_root() / "resources" / "ComfyUI" / "main.py",
+        ]
+        if executable:
+            install_root = Path(executable).resolve().parent
+            candidates.insert(0, install_root / "resources" / "ComfyUI" / "main.py")
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate.resolve())
+        return ""
+
+    def resolve_comfyui_models_dir(self) -> Path:
+        main_script = self.resolve_comfyui_main_script()
+        if main_script:
+            return Path(main_script).resolve().parent / "models"
+        return self.resolve_comfyui_data_root() / "models"
+
+    def resolve_comfyui_python_path(self) -> str:
+        data_root = self.resolve_comfyui_data_root()
+        executable = self.find_application_path("comfyui")
+        candidates = [
+            data_root / ".venv" / "Scripts" / "python.exe",
+            self._default_comfyui_install_root() / "resources" / "python" / "python.exe",
+            self._default_comfyui_install_root() / "resources" / "python_embeded" / "python.exe",
+            self._default_comfyui_install_root() / "resources" / "ComfyUI" / ".venv" / "Scripts" / "python.exe",
+        ]
+        if executable:
+            install_root = Path(executable).resolve().parent
+            candidates.extend(
+                [
+                    install_root / "resources" / "python" / "python.exe",
+                    install_root / "resources" / "python_embeded" / "python.exe",
+                    install_root / "resources" / "ComfyUI" / ".venv" / "Scripts" / "python.exe",
+                ]
+            )
+        for candidate in candidates:
+            if candidate.exists():
+                return str(candidate.resolve())
+        return ""
+
+    def resolve_comfyui_extra_paths_config(self) -> str:
+        path = self.extra_models_config_path()
+        return str(path.resolve()) if path.exists() else ""
+
+    def default_avatar_vae_path(self) -> Path:
+        target = self.resolve_comfyui_models_dir() / "vae"
+        target.mkdir(parents=True, exist_ok=True)
+        return target / DEFAULT_AVATAR_VAE_FILENAME
+
+    def download_default_avatar_vae(self, progress_callback: ProgressCallback | None = None) -> Path:
+        destination = self.default_avatar_vae_path()
+        if destination.exists() and destination.stat().st_size >= MIN_VALID_AVATAR_VAE_BYTES:
+            if progress_callback:
+                progress_callback(1.0, "El VAE base para avatar ya estaba descargado.")
+            return destination
+
+        temp_path = destination.with_suffix(".download")
+        if temp_path.exists():
+            temp_path.unlink()
+
+        with requests.get(DEFAULT_AVATAR_VAE_URL, stream=True, timeout=60) as response:
+            response.raise_for_status()
+            total = int(response.headers.get("Content-Length", "0") or "0")
+            written = 0
+            with temp_path.open("wb") as handle:
+                for chunk in response.iter_content(chunk_size=1024 * 1024):
+                    if not chunk:
+                        continue
+                    handle.write(chunk)
+                    written += len(chunk)
+                    if progress_callback and total > 0:
+                        ratio = min(1.0, written / total)
+                        progress_callback(ratio, f"Descargando VAE base para avatar {ratio * 100:.0f}%...")
+
+        if temp_path.stat().st_size < MIN_VALID_AVATAR_VAE_BYTES:
+            temp_path.unlink(missing_ok=True)
+            raise ValueError("La descarga del VAE base para avatar parece incompleta o invalida.")
+
+        temp_path.replace(destination)
+        if progress_callback:
+            progress_callback(1.0, "VAE base para avatar descargado correctamente.")
+        return destination
+
+    def _comfyui_host_port(self, configured_url: str) -> tuple[str, int]:
+        parsed = urlparse(configured_url.strip() or f"http://{DEFAULT_COMFYUI_HOST}:{DEFAULT_COMFYUI_PORT}")
+        host = (parsed.hostname or DEFAULT_COMFYUI_HOST).strip() or DEFAULT_COMFYUI_HOST
+        port = parsed.port or DEFAULT_COMFYUI_PORT
+        return host, port
+
+    def launch_comfyui_api_server(self, configured_url: str = "", *, gpu_choice: str = "Auto") -> bool:
+        resolved_url = self.resolve_comfyui_base_url(configured_url)
+        if resolved_url and self._comfyui_reachable(resolved_url):
+            return True
+
+        python_executable = self.resolve_comfyui_python_path()
+        main_script = self.resolve_comfyui_main_script()
+        if not python_executable or not main_script:
+            return False
+
+        data_root = self.resolve_comfyui_data_root()
+        output_dir = data_root / "output"
+        input_dir = data_root / "input"
+        user_dir = data_root / "user"
+        for directory in (output_dir, input_dir, user_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+
+        host, port = self._comfyui_host_port(configured_url)
+        command = [
+            python_executable,
+            main_script,
+            "--listen",
+            host,
+            "--port",
+            str(port),
+            "--output-directory",
+            str(output_dir),
+            "--input-directory",
+            str(input_dir),
+            "--user-directory",
+            str(user_dir),
+        ]
+        extra_paths_config = self.resolve_comfyui_extra_paths_config()
+        if extra_paths_config:
+            command.extend(["--extra-model-paths-config", extra_paths_config])
+
+        try:
+            subprocess.Popen(
+                command,
+                env=self._comfyui_launch_env(gpu_choice),
+                creationflags=CREATE_NO_WINDOW,
+            )
+            return True
+        except OSError:
+            return False
+
+    def launch_application(self, app_name: str, *, gpu_choice: str = "Auto", configured_url: str = "") -> bool:
+        if app_name.lower() == "comfyui" and self.launch_comfyui_api_server(configured_url, gpu_choice=gpu_choice):
+            return True
         executable = self.find_application_path(app_name)
         if not executable:
             return False
-        os.startfile(executable)  # type: ignore[attr-defined]
-        return True
+        try:
+            gpu_index = self.gpu_index_from_choice(gpu_choice) if app_name.lower() == "comfyui" else None
+            if gpu_index is None:
+                os.startfile(executable)  # type: ignore[attr-defined]
+            else:
+                subprocess.Popen(
+                    [executable],
+                    env=self._comfyui_launch_env(gpu_choice),
+                    creationflags=CREATE_NO_WINDOW,
+                )
+            return True
+        except OSError:
+            return False
 
     def ensure_ffmpeg_ready(self, configured_path: str = "", *, install_missing: bool = True) -> str:
         ffmpeg_path = self.resolve_ffmpeg_path(configured_path)
@@ -294,6 +527,14 @@ class SetupManager:
         }
         return mapping.get(aspect_ratio, mapping["9:16"])
 
+    def _avatar_workflow_dimensions(self, aspect_ratio: str) -> tuple[int, int]:
+        mapping = {
+            "9:16": (384, 576),
+            "16:9": (576, 384),
+            "1:1": (512, 512),
+        }
+        return mapping.get(aspect_ratio, mapping["9:16"])
+
     def managed_checkpoints_dir(self) -> Path:
         path = self.runtime_models_dir / "checkpoints"
         path.mkdir(parents=True, exist_ok=True)
@@ -310,6 +551,18 @@ class SetupManager:
 
     def ensure_extra_models_config(self) -> Path:
         target = self.extra_models_config_path()
+        desktop_root = self.resolve_comfyui_data_root().resolve().as_posix()
+        desktop_block = "\n".join(
+            [
+                DESKTOP_SECTION_BEGIN,
+                "comfyui_desktop:",
+                '  is_default: "true"',
+                "  custom_nodes: custom_nodes",
+                "  download_model_base: models",
+                f"  base_path: {desktop_root}",
+                DESKTOP_SECTION_END,
+            ]
+        )
         managed_root = self.runtime_models_dir.resolve().as_posix()
         managed_block = "\n".join(
             [
@@ -326,14 +579,22 @@ class SetupManager:
         else:
             current = ""
 
-        if MANAGED_SECTION_BEGIN in current and MANAGED_SECTION_END in current:
-            before, _sep, remainder = current.partition(MANAGED_SECTION_BEGIN)
+        updated = current
+        if DESKTOP_SECTION_BEGIN in updated and DESKTOP_SECTION_END in updated:
+            before, _sep, remainder = updated.partition(DESKTOP_SECTION_BEGIN)
+            _managed, _sep2, after = remainder.partition(DESKTOP_SECTION_END)
+            updated = (before.rstrip() + "\n" + desktop_block + "\n" + after.lstrip()).strip() + "\n"
+        elif updated.strip():
+            updated = updated.rstrip() + "\n\n" + desktop_block + "\n"
+        else:
+            updated = desktop_block + "\n"
+
+        if MANAGED_SECTION_BEGIN in updated and MANAGED_SECTION_END in updated:
+            before, _sep, remainder = updated.partition(MANAGED_SECTION_BEGIN)
             _managed, _sep2, after = remainder.partition(MANAGED_SECTION_END)
             updated = (before.rstrip() + "\n" + managed_block + "\n" + after.lstrip()).strip() + "\n"
-        elif current.strip():
-            updated = current.rstrip() + "\n\n" + managed_block + "\n"
         else:
-            updated = managed_block + "\n"
+            updated = updated.rstrip() + "\n\n" + managed_block + "\n"
 
         target.write_text(updated, encoding="utf-8")
         return target
@@ -457,6 +718,107 @@ class SetupManager:
         payload = self.build_default_workflow_payload(checkpoint_name=checkpoint_name.strip(), aspect_ratio=aspect_ratio)
         workflow_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         return workflow_path
+
+    def build_default_avatar_workflow_payload(self, *, aspect_ratio: str) -> dict[str, object]:
+        width, height = self._avatar_workflow_dimensions(aspect_ratio)
+        return {
+            "1": {
+                "inputs": {
+                "vae": DEFAULT_AVATAR_VAE_FILENAME,
+                "lora": "None",
+                "denoising": True,
+                "infer_mode": "audio_drived",
+                "lowvram": False,
+                "teacache_offload": True,
+                "block_offload": True,
+                "use_mmgp": "None",
+                "version": "V1",
+            },
+                "class_type": "Echo_LoadModel",
+            },
+            "2": {
+                "inputs": {
+                    "image": "__AVATAR_IMAGE__",
+                    "custom_width": 0,
+                    "custom_height": 0,
+                },
+                "class_type": "VHS_LoadImagePath",
+            },
+            "3": {
+                "inputs": {
+                    "audio_file": "__AUDIO_FILE__",
+                    "seek_seconds": 0,
+                    "duration": 0,
+                },
+                "class_type": "VHS_LoadAudio",
+            },
+            "4": {
+                "inputs": {
+                    "info": ["1", 1],
+                    "image": ["2", 0],
+                    "audio": ["3", 0],
+                    "prompt": "__PROMPT__",
+                    "negative_prompt": "__NEGATIVE_PROMPT__",
+                    "pose_dir": "pose_01",
+                    "width": "__WIDTH__",
+                    "height": "__HEIGHT__",
+                    "fps": "__FPS__",
+                    "facemask_ratio": 0.1,
+                    "facecrop_ratio": 0.8,
+                    "length": "__SCENE_FRAMES__",
+                    "partial_video_length": 65,
+                    "draw_mouse": False,
+                    "motion_sync_": False,
+                },
+                "class_type": "Echo_Predata",
+            },
+            "5": {
+                "inputs": {
+                    "model": ["1", 0],
+                    "emb": ["4", 0],
+                    "seed": "__SEED__",
+                    "cfg": 2.5,
+                    "steps": 4,
+                    "sample_rate": 16000,
+                    "context_frames": 8,
+                    "context_overlap": 2,
+                    "save_video": False,
+                },
+                "class_type": "Echo_Sampler",
+            },
+            "6": {
+                "inputs": {
+                    "images": ["5", 0],
+                    "audio": ["3", 0],
+                    "frame_rate": ["5", 1],
+                    "loop_count": 0,
+                    "filename_prefix": "__OUTPUT_PREFIX__",
+                    "format": "video/h264-mp4",
+                    "pix_fmt": "yuv420p",
+                    "crf": 19,
+                    "save_metadata": True,
+                    "trim_to_audio": True,
+                    "pingpong": False,
+                    "save_output": True,
+                },
+                "class_type": "VHS_VideoCombine",
+            },
+        }
+
+    def ensure_default_avatar_workflow(self, *, aspect_ratio: str) -> Path:
+        workflow_path = self.workflows_dir / "default_local_avatar_workflow.json"
+        payload = self.build_default_avatar_workflow_payload(aspect_ratio=aspect_ratio)
+        workflow_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        return workflow_path
+
+    def comfyui_has_nodes(self, base_url: str, required_node_types: list[str]) -> tuple[bool, list[str]]:
+        if not base_url.strip():
+            return False, list(required_node_types)
+        try:
+            client = ComfyUIClient(base_url=base_url)
+            return client.has_nodes(required_node_types)
+        except Exception:
+            return False, list(required_node_types)
 
     def _load_checkpoints(self, base_url: str) -> list[str]:
         if not base_url.strip():
@@ -673,7 +1035,10 @@ class SetupManager:
             )
             workflow_path = str(created_workflow)
             if not config.comfyui_negative_prompt.strip():
-                notes.append("Se preparo un workflow automatico listo para usar con ComfyUI.")
+                notes.append(
+                    "Se preparo un workflow automatico de imagen estatica para ComfyUI. "
+                    "Para video IA real debes cargar un workflow que produzca videos o gifs."
+                )
         elif not checkpoints and not local_checkpoints:
             if comfyui_reachable:
                 notes.append("ComfyUI respondio, pero no se detecto ningun modelo visual. Instala o copia un checkpoint y reinicia ComfyUI.")
@@ -714,7 +1079,6 @@ class SetupManager:
             updates["comfyui_checkpoint"] = checkpoint
         if workflow_path:
             updates["comfyui_workflow_path"] = workflow_path
-            updates["video_provider"] = "Local AI video"
         if not config.comfyui_negative_prompt.strip():
             updates["comfyui_negative_prompt"] = DEFAULT_NEGATIVE_PROMPT
         return SetupPreparationResult(updates=updates, status=status)

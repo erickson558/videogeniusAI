@@ -45,6 +45,7 @@ class AppConfig:
     comfyui_base_url: str = "http://127.0.0.1:8188"
     comfyui_worker_urls: str = ""
     parallel_scene_workers: int = 1
+    render_gpu_preference: str = "Auto"
     comfyui_checkpoint: str = ""
     comfyui_workflow_path: str = ""
     comfyui_negative_prompt: str = ""
@@ -53,6 +54,7 @@ class AppConfig:
     ffmpeg_path: str = ""
     piper_executable_path: str = ""
     piper_model_path: str = ""
+    avatar_source_image_path: str = ""
     setup_completed: bool = False
     temperature: float = 0.7
     scene_count: int = 6

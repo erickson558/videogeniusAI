@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parent
 VERSION_FILE = ROOT / "videogenius_ai" / "version.py"
 CHANGELOG_FILE = ROOT / "CHANGELOG.md"
 MANUAL_FILE = ROOT / "MANUAL_USUARIO.md"
+README_FILE = ROOT / "README.md"
 VERSION_PATTERN = re.compile(r'APP_VERSION = "(\d+\.\d+\.\d+)"')
 DISPLAY_VERSION_PATTERN = re.compile(r"V\d+\.\d+\.\d+")
 
@@ -60,6 +61,20 @@ def update_manual(version: str) -> None:
     MANUAL_FILE.write_text(content, encoding="utf-8")
 
 
+def update_readme(version: str) -> None:
+    if not README_FILE.exists():
+        return
+    display_version = _display_version(version)
+    content = README_FILE.read_text(encoding="utf-8")
+    content = re.sub(
+        r"Current app version:\s*`V\d+\.\d+\.\d+`",
+        f"Current app version: `{display_version}`",
+        content,
+        count=1,
+    )
+    README_FILE.write_text(content, encoding="utf-8")
+
+
 def update_changelog(version: str, notes: list[str]) -> None:
     changelog = CHANGELOG_FILE.read_text(encoding="utf-8")
     bullet_lines = "\n".join(f"- {note}" for note in notes) if notes else "- Maintenance release."
@@ -88,6 +103,7 @@ def parse_args() -> argparse.Namespace:
 
 def write_version(version: str, notes: list[str]) -> None:
     update_version_file(version)
+    update_readme(version)
     update_manual(version)
     update_changelog(version, notes)
 

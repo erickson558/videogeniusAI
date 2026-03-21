@@ -7,18 +7,30 @@ import textwrap
 from pathlib import Path
 from shutil import which
 
-from .comfyui_client import ComfyUIClient
+from .comfyui_client import ComfyUIClient, detect_workflow_output_mode
+from .logging_utils import configure_logging
 from .models import GeneratedSceneAsset, RenderedVideoResult, VideoRenderRequest
 from .tts_service import PiperTTSService, WindowsTTSService
 from .utils import now_stamp, sanitize_filename
 
 CREATE_NO_WINDOW = 0x08000000
+LOGGER = configure_logging(__name__)
 
 ASPECT_RATIO_DIMENSIONS = {
     "9:16": (720, 1280),
     "16:9": (1280, 720),
     "1:1": (1080, 1080),
 }
+AVATAR_WORKFLOW_DIMENSIONS = {
+    "9:16": (384, 576),
+    "16:9": (576, 384),
+    "1:1": (512, 512),
+}
+AVATAR_WORKFLOW_FPS = 20
+
+
+class LocalAIVideoWorkflowError(ValueError):
+    pass
 
 
 def _ffmpeg_escape_path(path: str | Path) -> str:
@@ -28,6 +40,7 @@ def _ffmpeg_escape_path(path: str | Path) -> str:
 
 class LocalAIVideoService:
     def __init__(self, ffmpeg_path: str = "") -> None:
+        self.logger = LOGGER
         resolved_ffmpeg = ffmpeg_path.strip() if ffmpeg_path.strip() and Path(ffmpeg_path).exists() else (which("ffmpeg") or which("ffmpeg.exe"))
         resolved_ffprobe = ""
         if resolved_ffmpeg:
@@ -43,6 +56,9 @@ class LocalAIVideoService:
 
     def _dimensions_for_ratio(self, aspect_ratio: str) -> tuple[int, int]:
         return ASPECT_RATIO_DIMENSIONS.get(aspect_ratio, ASPECT_RATIO_DIMENSIONS["9:16"])
+
+    def _avatar_dimensions_for_ratio(self, aspect_ratio: str) -> tuple[int, int]:
+        return AVATAR_WORKFLOW_DIMENSIONS.get(aspect_ratio, AVATAR_WORKFLOW_DIMENSIONS["9:16"])
 
     def _run(self, command: list[str]) -> None:
         subprocess.run(
@@ -233,6 +249,12 @@ class LocalAIVideoService:
         worker_urls = self._worker_urls(request)
         total_scenes = max(1, len(request.project.scenes))
         max_workers = self._effective_worker_count(request, total_scenes)
+        self.logger.info(
+            "Generating Local AI assets | workers=%s | worker_urls=%s | gpu_preference=%s",
+            max_workers,
+            ", ".join(worker_urls),
+            request.render_gpu_preference or "Auto",
+        )
 
         assignments: list[list[int]] = [[] for _ in range(max_workers)]
         for index in range(total_scenes):
@@ -249,6 +271,12 @@ class LocalAIVideoService:
                 timeout_seconds=request.request_timeout_seconds,
             )
             worker_scenes = assignments[worker_index]
+            self.logger.info(
+                "ComfyUI worker started | worker_index=%s | base_url=%s | assigned_scenes=%s",
+                worker_index + 1,
+                worker_urls[worker_index],
+                [request.project.scenes[index].scene_number for index in worker_scenes],
+            )
             for scene_index in worker_scenes:
                 scene = request.project.scenes[scene_index]
                 with lock:
@@ -266,9 +294,21 @@ class LocalAIVideoService:
                     destination_stem=assets_dir / f"scene_{scene.scene_number:02d}",
                     poll_interval_seconds=request.comfyui_poll_interval_seconds,
                 )
+                if asset.asset_type != "video":
+                    raise LocalAIVideoWorkflowError(
+                        "ComfyUI devolvio una imagen estatica para una escena. "
+                        "Para 'Local AI video' el workflow debe devolver clips de video o gifs animados."
+                    )
                 with lock:
                     generated_assets[scene_index] = asset
                     completed_assets += 1
+                    self.logger.info(
+                        "Scene asset completed | worker_index=%s | scene_number=%s | asset_type=%s | file_path=%s",
+                        worker_index + 1,
+                        scene.scene_number,
+                        asset.asset_type,
+                        asset.file_path,
+                    )
                     if progress_callback:
                         progress_callback(
                             0.1 + (completed_assets / total_scenes) * 0.46,
@@ -282,9 +322,218 @@ class LocalAIVideoService:
 
         return generated_assets
 
+    def _avatar_replacements(
+        self,
+        avatar_image_path: Path,
+        audio_path: Path,
+        *,
+        width: int,
+        height: int,
+        fps: int,
+        duration_seconds: float,
+    ) -> dict[str, str | int]:
+        image_text = str(avatar_image_path.resolve())
+        audio_text = str(audio_path.resolve())
+        scene_frames = max(fps * 2, min(480, int(duration_seconds * fps) + 8))
+        return {
+            "__SOURCE_IMAGE__": image_text,
+            "__AVATAR_IMAGE__": image_text,
+            "__SOURCE_AVATAR__": image_text,
+            "__AUDIO_FILE__": audio_text,
+            "__AUDIO_PATH__": audio_text,
+            "__DRIVEN_AUDIO__": audio_text,
+            "__WIDTH__": width,
+            "__HEIGHT__": height,
+            "__FPS__": fps,
+            "__SCENE_FRAMES__": scene_frames,
+        }
+
+    def _generate_avatar_assets(
+        self,
+        *,
+        request: VideoRenderRequest,
+        avatar_image_path: Path,
+        assets_dir: Path,
+        audio_dir: Path,
+        progress_callback,
+    ) -> tuple[dict[int, GeneratedSceneAsset], dict[int, Path]]:
+        if request.tts_backend == "Sin voz":
+            raise LocalAIVideoWorkflowError(
+                "Local Avatar video necesita audio por escena para lipsync. Usa Windows local o Piper local."
+            )
+
+        worker_urls = self._worker_urls(request)
+        total_scenes = max(1, len(request.project.scenes))
+        generated_assets: dict[int, GeneratedSceneAsset] = {}
+        generated_audio: dict[int, Path] = {}
+        self.logger.info(
+            "Generating Local Avatar assets | workers=%s | worker_urls=%s | avatar_image=%s",
+            len(worker_urls),
+            ", ".join(worker_urls),
+            avatar_image_path,
+        )
+        avatar_width, avatar_height = self._avatar_dimensions_for_ratio(request.aspect_ratio)
+
+        for index, scene in enumerate(request.project.scenes):
+            if progress_callback:
+                progress_callback(
+                    0.06 + ((index / total_scenes) * 0.42),
+                    f"Avatar local: preparando escena {scene.scene_number}/{total_scenes}...",
+                )
+            audio_path = self._scene_audio(request, index, audio_dir)
+            if audio_path is None:
+                raise LocalAIVideoWorkflowError(
+                    f"La escena {scene.scene_number} no tiene audio utilizable. "
+                    "Local Avatar video necesita narracion o descripcion para generar lipsync."
+                )
+            audio_duration = self._media_duration(audio_path)
+            client = ComfyUIClient(
+                base_url=worker_urls[index % len(worker_urls)],
+                timeout_seconds=request.request_timeout_seconds,
+            )
+            asset = client.generate_scene_asset(
+                workflow_path=request.comfyui_workflow_path,
+                prompt_text=self._scene_prompt(request, index),
+                negative_prompt=request.comfyui_negative_prompt,
+                output_prefix=f"{sanitize_filename(request.project.title)}_avatar_scene_{scene.scene_number:02d}",
+                destination_stem=assets_dir / f"avatar_scene_{scene.scene_number:02d}",
+                poll_interval_seconds=request.comfyui_poll_interval_seconds,
+                extra_replacements=self._avatar_replacements(
+                    avatar_image_path,
+                    audio_path,
+                    width=avatar_width,
+                    height=avatar_height,
+                    fps=AVATAR_WORKFLOW_FPS,
+                    duration_seconds=audio_duration,
+                ),
+            )
+            if asset.asset_type != "video":
+                raise LocalAIVideoWorkflowError(
+                    "El workflow de avatar devolvio una imagen estatica. "
+                    "Para 'Local Avatar video' el workflow debe devolver clips de video o gifs animados."
+                )
+            generated_assets[index] = asset
+            generated_audio[index] = audio_path
+            self.logger.info(
+                "Avatar scene completed | scene_number=%s | asset_type=%s | file_path=%s",
+                scene.scene_number,
+                asset.asset_type,
+                asset.file_path,
+            )
+            if progress_callback:
+                progress_callback(
+                    0.1 + (((index + 1) / total_scenes) * 0.42),
+                    f"Avatar local: {index + 1}/{total_scenes} escenas listas.",
+                )
+        return generated_assets, generated_audio
+
+    def _render_avatar_video(self, request: VideoRenderRequest, progress_callback=None) -> RenderedVideoResult:
+        if not request.avatar_source_image_path.strip():
+            raise LocalAIVideoWorkflowError(
+                "Local Avatar video necesita una imagen base del avatar."
+            )
+        avatar_image_path = Path(request.avatar_source_image_path).expanduser()
+        if not avatar_image_path.exists():
+            raise FileNotFoundError(f"Avatar source image not found: {avatar_image_path}")
+        if not request.comfyui_workflow_path.strip():
+            raise ValueError("Select a ComfyUI workflow JSON file before using Local Avatar video mode.")
+        workflow_mode = detect_workflow_output_mode(request.comfyui_workflow_path)
+        if workflow_mode == "image":
+            raise LocalAIVideoWorkflowError(
+                "El workflow seleccionado solo genera imagenes estaticas. "
+                "Para 'Local Avatar video' necesitas un workflow que produzca videos o gifs reales."
+            )
+
+        session_root = Path(request.output_dir) / f"{now_stamp()}_{sanitize_filename(request.project.title)}_local_avatar"
+        assets_dir = session_root / "assets"
+        audio_dir = session_root / "audio"
+        subtitle_dir = session_root / "subtitles"
+        clips_dir = session_root / "clips"
+        for directory in [assets_dir, audio_dir, subtitle_dir, clips_dir]:
+            directory.mkdir(parents=True, exist_ok=True)
+
+        width, height = self._dimensions_for_ratio(request.aspect_ratio)
+        total_scenes = max(1, len(request.project.scenes))
+        self.logger.info(
+            "Starting Local Avatar render | title=%s | scenes=%s | avatar_image=%s | workflow=%s",
+            request.project.title,
+            total_scenes,
+            avatar_image_path,
+            request.comfyui_workflow_path,
+        )
+        generated_assets, generated_audio = self._generate_avatar_assets(
+            request=request,
+            avatar_image_path=avatar_image_path,
+            assets_dir=assets_dir,
+            audio_dir=audio_dir,
+            progress_callback=progress_callback,
+        )
+
+        clip_paths: list[Path] = []
+        for index, scene in enumerate(request.project.scenes):
+            audio_path = generated_audio[index]
+            duration_seconds = self._media_duration(audio_path)
+            subtitle_path: Path | None = None
+            if request.render_captions:
+                caption_text = self._scene_caption(request, index)
+                if caption_text:
+                    subtitle_path = self._write_scene_subtitle(
+                        caption_text,
+                        duration_seconds,
+                        subtitle_dir / f"scene_{scene.scene_number:02d}.srt",
+                    )
+            if progress_callback:
+                progress_callback(
+                    0.58 + ((index / total_scenes) * 0.30),
+                    f"Componiendo clip avatar {index + 1}/{total_scenes}...",
+                )
+            clip_path = self._build_scene_clip(
+                asset=generated_assets[index],
+                audio_path=audio_path,
+                target_duration=duration_seconds,
+                width=width,
+                height=height,
+                subtitle_path=subtitle_path,
+                output_path=clips_dir / f"scene_{scene.scene_number:02d}.mp4",
+            )
+            clip_paths.append(clip_path)
+
+        if progress_callback:
+            progress_callback(0.92, "Uniendo clips avatar y finalizando el MP4...")
+        output_path = Path(request.output_dir) / f"{now_stamp()}_{sanitize_filename(request.project.title)}_local_avatar.mp4"
+        self._concat_scene_clips(
+            clip_paths=clip_paths,
+            manifest_path=session_root / "concat_manifest.txt",
+            output_path=output_path,
+        )
+        if progress_callback:
+            progress_callback(1.0, "Video avatar completado.")
+        self.logger.info(
+            "Local Avatar render completed | output=%s | session_root=%s",
+            output_path,
+            session_root,
+        )
+        return RenderedVideoResult(
+            provider="Local Avatar video",
+            file_path=output_path,
+            metadata={
+                "session_root": str(session_root),
+                "avatar_image_path": str(avatar_image_path),
+                "scenes_rendered": total_scenes,
+            },
+        )
+
     def render(self, request: VideoRenderRequest, progress_callback=None) -> RenderedVideoResult:
+        if (request.provider or "").strip() == "Local Avatar video":
+            return self._render_avatar_video(request, progress_callback)
         if not request.comfyui_workflow_path.strip():
             raise ValueError("Select a ComfyUI workflow JSON file before using Local AI video mode.")
+        workflow_mode = detect_workflow_output_mode(request.comfyui_workflow_path)
+        if workflow_mode == "image":
+            raise LocalAIVideoWorkflowError(
+                "El workflow de ComfyUI seleccionado solo genera imagenes estaticas. "
+                "Para 'Local AI video' necesitas un workflow que produzca videos o gifs reales por escena."
+            )
 
         session_root = Path(request.output_dir) / f"{now_stamp()}_{sanitize_filename(request.project.title)}_local_ai"
         assets_dir = session_root / "assets"
@@ -298,6 +547,14 @@ class LocalAIVideoService:
         clip_paths: list[Path] = []
         total_scenes = max(1, len(request.project.scenes))
         effective_workers = self._effective_worker_count(request, total_scenes)
+        self.logger.info(
+            "Starting Local AI render | title=%s | scenes=%s | workers=%s | aspect_ratio=%s | workflow=%s",
+            request.project.title,
+            total_scenes,
+            effective_workers,
+            request.aspect_ratio,
+            request.comfyui_workflow_path,
+        )
         if progress_callback:
             progress_callback(0.04, "Detectando workers de ComfyUI y preparando render IA...")
         generated_assets = self._generate_assets(
@@ -345,6 +602,12 @@ class LocalAIVideoService:
         )
         if progress_callback:
             progress_callback(1.0, "Video final completado.")
+        self.logger.info(
+            "Local AI render completed | output=%s | session_root=%s | workers=%s",
+            output_path,
+            session_root,
+            effective_workers,
+        )
         return RenderedVideoResult(
             provider="Local AI video",
             file_path=output_path,

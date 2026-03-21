@@ -5,6 +5,7 @@ import json
 import os
 import queue
 import threading
+import time
 import tkinter as tk
 from datetime import datetime
 from pathlib import Path
@@ -14,11 +15,12 @@ from typing import Any, Callable
 import customtkinter as ctk
 import requests
 
-from .comfyui_client import ComfyUIClient
+from .comfyui_client import ComfyUIClient, detect_workflow_output_mode
 from .config import AppConfig, ConfigManager, sanitize_window_geometry
 from .export_service import ExportService
 from .generator_service import SceneGeneratorService
 from .history_service import HistoryEntry, HistoryService
+from .local_ai_video_service import LocalAIVideoWorkflowError
 from .lmstudio_client import LMStudioClient
 from .logging_utils import configure_logging
 from .models import GenerationRequest, VideoProject, VideoRenderRequest
@@ -71,7 +73,7 @@ class VideoGeniusApp(ctk.CTk):
             self._alpha_hidden = True
         except tk.TclError:
             self._alpha_hidden = False
-        self.logger = configure_logging()
+        self.logger = configure_logging(__name__)
         self.config_manager = ConfigManager()
         self.app_config: AppConfig = self.config_manager.config
         ctk.set_appearance_mode(self._normalize_appearance_mode(self.app_config.appearance_mode))
@@ -209,6 +211,7 @@ class VideoGeniusApp(ctk.CTk):
         self.comfyui_base_url_var = tk.StringVar(value=self.app_config.comfyui_base_url)
         self.comfyui_worker_urls_var = tk.StringVar(value=self.app_config.comfyui_worker_urls)
         self.parallel_scene_workers_var = tk.StringVar(value=str(self.app_config.parallel_scene_workers))
+        self.render_gpu_var = tk.StringVar(value=self.app_config.render_gpu_preference or "Auto")
         self.comfyui_checkpoint_var = tk.StringVar(value=self.app_config.comfyui_checkpoint)
         self.comfyui_workflow_path_var = tk.StringVar(value=self.app_config.comfyui_workflow_path)
         self.comfyui_negative_prompt_var = tk.StringVar(value=self.app_config.comfyui_negative_prompt)
@@ -217,6 +220,7 @@ class VideoGeniusApp(ctk.CTk):
         self.ffmpeg_path_var = tk.StringVar(value=self.app_config.ffmpeg_path)
         self.piper_executable_path_var = tk.StringVar(value=self.app_config.piper_executable_path)
         self.piper_model_path_var = tk.StringVar(value=self.app_config.piper_model_path)
+        self.avatar_source_image_path_var = tk.StringVar(value=self.app_config.avatar_source_image_path)
         self.temperature_var = tk.DoubleVar(value=self.app_config.temperature)
         self.scene_count_var = tk.StringVar(value=str(self.app_config.scene_count))
         self.language_var = tk.StringVar(value=self.app_config.output_language)
@@ -246,6 +250,7 @@ class VideoGeniusApp(ctk.CTk):
             self.comfyui_base_url_var,
             self.comfyui_worker_urls_var,
             self.parallel_scene_workers_var,
+            self.render_gpu_var,
             self.comfyui_checkpoint_var,
             self.comfyui_workflow_path_var,
             self.comfyui_negative_prompt_var,
@@ -254,6 +259,7 @@ class VideoGeniusApp(ctk.CTk):
             self.ffmpeg_path_var,
             self.piper_executable_path_var,
             self.piper_model_path_var,
+            self.avatar_source_image_path_var,
             self.temperature_var,
             self.scene_count_var,
             self.language_var,
@@ -492,7 +498,7 @@ class VideoGeniusApp(ctk.CTk):
             12,
             "Render backend",
             self.video_provider_var,
-            ["Storyboard local", "Local AI video"],
+            ["Storyboard local", "Local AI video", "Local Avatar video"],
         )
         self.video_provider_combo.configure(command=lambda _value: self._on_video_provider_change())
         self._make_labeled_combo(
@@ -578,13 +584,14 @@ class VideoGeniusApp(ctk.CTk):
         self._make_labeled_combo(lm_card, 12, "Output language", self.language_var, ["Espanol", "English", "Portugues", "Frances"])
         row += 1
 
-        self.local_ai_card = self._make_card(self.sidebar, "Local AI backend", "Needed only when the backend is Local AI video.")
+        self.local_ai_card = self._make_card(self.sidebar, "Local AI backend", "Needed for Local AI video and Local Avatar video when ComfyUI returns real video or gif clips.")
         self.local_ai_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
         self._make_labeled_entry(self.local_ai_card, 2, "ComfyUI base URL", self.comfyui_base_url_var)
         self._make_labeled_entry(self.local_ai_card, 4, "ComfyUI worker URLs", self.comfyui_worker_urls_var)
         self._make_labeled_entry(self.local_ai_card, 6, "Parallel workers", self.parallel_scene_workers_var)
-        self.comfyui_checkpoint_combo = self._make_labeled_combo(self.local_ai_card, 8, "Visual model", self.comfyui_checkpoint_var, [""])
-        self._make_labeled_entry(self.local_ai_card, 10, "Workflow JSON path", self.comfyui_workflow_path_var)
+        self.render_gpu_combo = self._make_labeled_combo(self.local_ai_card, 8, "GPU for Local AI render", self.render_gpu_var, ["Auto"])
+        self.comfyui_checkpoint_combo = self._make_labeled_combo(self.local_ai_card, 10, "Visual model", self.comfyui_checkpoint_var, [""])
+        self._make_labeled_entry(self.local_ai_card, 12, "Workflow JSON path", self.comfyui_workflow_path_var)
         workflow_button = ctk.CTkButton(
             self.local_ai_card,
             text="Browse or keep auto workflow",
@@ -592,13 +599,13 @@ class VideoGeniusApp(ctk.CTk):
             fg_color=ui_color("#0F766E", "#0F766E"),
             hover_color=ui_color("#115E59", "#134E4A"),
         )
-        workflow_button.grid(row=12, column=0, sticky="ew", padx=14, pady=(0, 10))
-        self._make_labeled_entry(self.local_ai_card, 13, "Negative prompt", self.comfyui_negative_prompt_var)
-        self._make_labeled_entry(self.local_ai_card, 15, "FFmpeg path", self.ffmpeg_path_var)
-        self._make_labeled_entry(self.local_ai_card, 17, "ComfyUI poll interval (s)", self.comfyui_poll_interval_var)
-        self._make_labeled_combo(self.local_ai_card, 19, "TTS backend", self.tts_backend_var, ["Windows local", "Sin voz", "Piper local"])
-        self.piper_executable_entry = self._make_labeled_entry(self.local_ai_card, 21, "Piper executable", self.piper_executable_path_var)
-        self.piper_model_entry = self._make_labeled_entry(self.local_ai_card, 23, "Piper model", self.piper_model_path_var)
+        workflow_button.grid(row=14, column=0, sticky="ew", padx=14, pady=(0, 10))
+        self._make_labeled_entry(self.local_ai_card, 16, "Negative prompt", self.comfyui_negative_prompt_var)
+        self._make_labeled_entry(self.local_ai_card, 18, "FFmpeg path", self.ffmpeg_path_var)
+        self._make_labeled_entry(self.local_ai_card, 20, "ComfyUI poll interval (s)", self.comfyui_poll_interval_var)
+        self._make_labeled_combo(self.local_ai_card, 22, "TTS backend", self.tts_backend_var, ["Windows local", "Sin voz", "Piper local"])
+        self.piper_executable_entry = self._make_labeled_entry(self.local_ai_card, 24, "Piper executable", self.piper_executable_path_var)
+        self.piper_model_entry = self._make_labeled_entry(self.local_ai_card, 26, "Piper model", self.piper_model_path_var)
         self.piper_button = ctk.CTkButton(
             self.local_ai_card,
             text="Browse Piper model",
@@ -606,15 +613,24 @@ class VideoGeniusApp(ctk.CTk):
             fg_color=ui_color("#2563EB", "#1D4ED8"),
             hover_color=ui_color("#1E40AF", "#1E3A8A"),
         )
-        self.piper_button.grid(row=25, column=0, sticky="ew", padx=14, pady=(0, 6))
+        self.piper_button.grid(row=28, column=0, sticky="ew", padx=14, pady=(0, 6))
+        self.avatar_source_image_entry = self._make_labeled_entry(self.local_ai_card, 30, "Avatar source image", self.avatar_source_image_path_var)
+        self.avatar_source_image_button = ctk.CTkButton(
+            self.local_ai_card,
+            text="Browse avatar image",
+            command=self.choose_avatar_image,
+            fg_color=ui_color("#9333EA", "#7E22CE"),
+            hover_color=ui_color("#7E22CE", "#6B21A8"),
+        )
+        self.avatar_source_image_button.grid(row=32, column=0, sticky="ew", padx=14, pady=(0, 6))
         ctk.CTkLabel(
             self.local_ai_card,
-            text="Consejo: usa 'Windows local' para voz sin instalar Piper. Si ejecutas varias instancias de ComfyUI en puertos distintos, agrega todas las URLs y la app repartira escenas entre los workers.",
+            text="Consejo: usa 'Windows local' para voz sin instalar Piper. El workflow automatico que crea la app sirve para imagen estatica, no para video IA real. Para 'Local AI video' selecciona un workflow de ComfyUI que produzca clips o gifs. Para 'Local Avatar video' usa un workflow de lipsync/avatar y una imagen base del avatar. Si eliges una GPU, la app intentara usarla cuando abra ComfyUI automaticamente.",
             text_color=ui_color("#94A3B8", "#94A3B8"),
             wraplength=330,
             justify="left",
             font=ctk.CTkFont("Segoe UI", 12),
-        ).grid(row=26, column=0, sticky="w", padx=14, pady=(0, 10))
+        ).grid(row=33, column=0, sticky="w", padx=14, pady=(0, 10))
         row += 1
 
         advanced_card = self._make_card(self.sidebar, "Automation and advanced", "Saved in config.json next to the app.")
@@ -897,7 +913,7 @@ class VideoGeniusApp(ctk.CTk):
     def _sync_video_provider_ui(self) -> None:
         provider = self.video_provider_var.get().strip() or "Storyboard local"
         self.render_chip.configure(text=f"Video backend: {provider}")
-        is_local_ai = provider == "Local AI video"
+        is_local_ai = provider in {"Local AI video", "Local Avatar video"}
         if hasattr(self, "local_ai_card"):
             if is_local_ai:
                 self.local_ai_card.grid()
@@ -905,7 +921,27 @@ class VideoGeniusApp(ctk.CTk):
                 self.local_ai_card.grid_remove()
         if hasattr(self, "local_video_button"):
             self.local_video_button.configure(state="normal" if is_local_ai and not self.is_busy else "disabled")
+        self._sync_avatar_ui()
         self._sync_tts_ui()
+
+    def _sync_avatar_ui(self) -> None:
+        use_avatar = self.video_provider_var.get().strip() == "Local Avatar video"
+        widgets = [
+            getattr(self, "avatar_source_image_entry", None),
+            getattr(self, "avatar_source_image_button", None),
+        ]
+        for widget in widgets:
+            if widget is None:
+                continue
+            label_widget = getattr(widget, "_label_widget", None)
+            if use_avatar:
+                if label_widget is not None:
+                    label_widget.grid()
+                widget.grid()
+            else:
+                if label_widget is not None:
+                    label_widget.grid_remove()
+                widget.grid_remove()
 
     def _sync_tts_ui(self) -> None:
         use_piper = self.tts_backend_var.get().strip() == "Piper local"
@@ -995,6 +1031,7 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_base_url=self.comfyui_base_url_var.get().strip() or "http://127.0.0.1:8188",
             comfyui_worker_urls=self.comfyui_worker_urls_var.get().strip(),
             parallel_scene_workers=self._safe_positive_int(self.parallel_scene_workers_var.get(), 1),
+            render_gpu_preference=self.render_gpu_var.get().strip() or "Auto",
             comfyui_checkpoint=self.comfyui_checkpoint_var.get().strip(),
             comfyui_workflow_path=self.comfyui_workflow_path_var.get().strip(),
             comfyui_negative_prompt=self.comfyui_negative_prompt_var.get().strip(),
@@ -1003,6 +1040,7 @@ class VideoGeniusApp(ctk.CTk):
             ffmpeg_path=self.ffmpeg_path_var.get().strip(),
             piper_executable_path=self.piper_executable_path_var.get().strip(),
             piper_model_path=self.piper_model_path_var.get().strip(),
+            avatar_source_image_path=self.avatar_source_image_path_var.get().strip(),
             temperature=round(float(self.temperature_var.get()), 2),
             scene_count=self._safe_positive_int(self.scene_count_var.get(), self.app_config.scene_count),
             output_language=self.language_var.get().strip() or "Espanol",
@@ -1070,31 +1108,47 @@ class VideoGeniusApp(ctk.CTk):
             raise ValueError("Generate or load a project before creating the final video.")
         return self._build_video_render_request_for_project(self.current_project)
 
+    def _describe_workflow_mode(self, workflow_path: str) -> str:
+        if not workflow_path.strip():
+            return "missing"
+        return detect_workflow_output_mode(workflow_path)
+
     def _capture_video_render_settings(self) -> dict[str, Any]:
+        provider = self.video_provider_var.get().strip() or "Storyboard local"
         workflow_path = self.comfyui_workflow_path_var.get().strip()
         checkpoint = self.comfyui_checkpoint_var.get().strip()
-        if not workflow_path and checkpoint:
-            try:
-                generated = self.setup_manager.ensure_default_workflow(
-                    checkpoint_name=checkpoint,
-                    aspect_ratio=self.video_aspect_ratio_var.get().strip() or "9:16",
+        workflow_mode = self._describe_workflow_mode(workflow_path)
+        avatar_source_image_path = self.avatar_source_image_path_var.get().strip()
+        if provider == "Local AI video":
+            if workflow_mode == "missing":
+                raise ValueError(
+                    "Para 'Local AI video' debes seleccionar un workflow JSON de ComfyUI que produzca video o gif real por escena."
                 )
-                workflow_path = str(generated)
-                self.comfyui_workflow_path_var.set(workflow_path)
-            except Exception:
-                workflow_path = ""
+            if workflow_mode == "image":
+                raise ValueError(
+                    "El workflow seleccionado solo genera imagenes estaticas. Para 'Local AI video' usa un workflow de ComfyUI que produzca videos o gifs reales."
+                )
+        if provider == "Local Avatar video":
+            if not avatar_source_image_path:
+                raise ValueError("Local Avatar video necesita una imagen base del avatar.")
+            avatar_path = Path(avatar_source_image_path).expanduser()
+            if not avatar_path.exists():
+                raise FileNotFoundError(f"Avatar source image not found: {avatar_path}")
+            if (self.tts_backend_var.get().strip() or "Windows local") == "Sin voz":
+                raise ValueError("Local Avatar video necesita audio para lipsync. Usa Windows local o Piper local.")
         ffmpeg_path = self.ffmpeg_path_var.get().strip() or self.setup_manager.resolve_ffmpeg_path(self.ffmpeg_path_var.get())
         if ffmpeg_path and ffmpeg_path != self.ffmpeg_path_var.get().strip():
             self.ffmpeg_path_var.set(ffmpeg_path)
         return {
             "output_dir": self.config_manager.resolve_output_dir(),
-            "provider": self.video_provider_var.get().strip() or "Storyboard local",
+            "provider": provider,
             "aspect_ratio": self.video_aspect_ratio_var.get().strip() or "9:16",
             "request_timeout_seconds": self._safe_positive_int(self.timeout_var.get(), 180),
             "render_captions": bool(self.render_captions_var.get()),
             "comfyui_base_url": self.comfyui_base_url_var.get().strip() or "http://127.0.0.1:8188",
             "comfyui_worker_urls": self.comfyui_worker_urls_var.get().strip(),
             "parallel_scene_workers": self._safe_positive_int(self.parallel_scene_workers_var.get(), 1),
+            "render_gpu_preference": self.render_gpu_var.get().strip() or "Auto",
             "comfyui_checkpoint": checkpoint,
             "comfyui_workflow_path": workflow_path,
             "comfyui_negative_prompt": self.comfyui_negative_prompt_var.get().strip(),
@@ -1103,6 +1157,7 @@ class VideoGeniusApp(ctk.CTk):
             "ffmpeg_path": ffmpeg_path,
             "piper_executable_path": self.piper_executable_path_var.get().strip(),
             "piper_model_path": self.piper_model_path_var.get().strip(),
+            "avatar_source_image_path": avatar_source_image_path,
         }
 
     def _build_video_render_request_for_project(self, project: VideoProject, settings: dict[str, Any] | None = None) -> VideoRenderRequest:
@@ -1117,6 +1172,7 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_base_url=options["comfyui_base_url"],
             comfyui_worker_urls=options["comfyui_worker_urls"],
             parallel_scene_workers=options["parallel_scene_workers"],
+            render_gpu_preference=options["render_gpu_preference"],
             comfyui_checkpoint=options["comfyui_checkpoint"],
             comfyui_workflow_path=options["comfyui_workflow_path"],
             comfyui_negative_prompt=options["comfyui_negative_prompt"],
@@ -1125,6 +1181,7 @@ class VideoGeniusApp(ctk.CTk):
             ffmpeg_path=options["ffmpeg_path"],
             piper_executable_path=options["piper_executable_path"],
             piper_model_path=options["piper_model_path"],
+            avatar_source_image_path=options["avatar_source_image_path"],
         )
 
     def _build_runtime_config_snapshot(self, render_settings: dict[str, Any]) -> AppConfig:
@@ -1138,6 +1195,7 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_base_url=render_settings["comfyui_base_url"],
             comfyui_worker_urls=render_settings["comfyui_worker_urls"],
             parallel_scene_workers=self._safe_positive_int(str(render_settings["parallel_scene_workers"]), 1),
+            render_gpu_preference=str(render_settings["render_gpu_preference"] or "Auto"),
             comfyui_checkpoint=render_settings["comfyui_checkpoint"],
             comfyui_workflow_path=render_settings["comfyui_workflow_path"],
             comfyui_negative_prompt=render_settings["comfyui_negative_prompt"],
@@ -1146,6 +1204,32 @@ class VideoGeniusApp(ctk.CTk):
             ffmpeg_path=render_settings["ffmpeg_path"],
             piper_executable_path=render_settings["piper_executable_path"],
             piper_model_path=render_settings["piper_model_path"],
+            avatar_source_image_path=render_settings["avatar_source_image_path"],
+            request_timeout_seconds=self._safe_positive_int(self.timeout_var.get(), 120),
+        )
+
+    def _build_environment_config_snapshot(self) -> AppConfig:
+        return replace(
+            self.app_config,
+            appearance_mode=self._appearance_label_to_mode(self.appearance_mode_var.get()),
+            lmstudio_base_url=self.base_url_var.get().strip() or "http://127.0.0.1:1234",
+            model=self.model_var.get().strip(),
+            video_provider=self.video_provider_var.get().strip() or "Storyboard local",
+            video_aspect_ratio=self.video_aspect_ratio_var.get().strip() or "9:16",
+            render_captions=bool(self.render_captions_var.get()),
+            comfyui_base_url=self.comfyui_base_url_var.get().strip() or "http://127.0.0.1:8188",
+            comfyui_worker_urls=self.comfyui_worker_urls_var.get().strip(),
+            parallel_scene_workers=self._safe_positive_int(self.parallel_scene_workers_var.get(), 1),
+            render_gpu_preference=self.render_gpu_var.get().strip() or "Auto",
+            comfyui_checkpoint=self.comfyui_checkpoint_var.get().strip(),
+            comfyui_workflow_path=self.comfyui_workflow_path_var.get().strip(),
+            comfyui_negative_prompt=self.comfyui_negative_prompt_var.get().strip(),
+            comfyui_poll_interval_seconds=self._safe_positive_int(self.comfyui_poll_interval_var.get(), 2),
+            tts_backend=self.tts_backend_var.get().strip() or "Windows local",
+            ffmpeg_path=self.ffmpeg_path_var.get().strip(),
+            piper_executable_path=self.piper_executable_path_var.get().strip(),
+            piper_model_path=self.piper_model_path_var.get().strip(),
+            avatar_source_image_path=self.avatar_source_image_path_var.get().strip(),
             request_timeout_seconds=self._safe_positive_int(self.timeout_var.get(), 120),
         )
 
@@ -1167,6 +1251,7 @@ class VideoGeniusApp(ctk.CTk):
             "comfyui_base_url": "comfyui_base_url",
             "comfyui_worker_urls": "comfyui_worker_urls",
             "parallel_scene_workers": "parallel_scene_workers",
+            "render_gpu_preference": "render_gpu_preference",
             "comfyui_checkpoint": "comfyui_checkpoint",
             "comfyui_workflow_path": "comfyui_workflow_path",
             "comfyui_negative_prompt": "comfyui_negative_prompt",
@@ -1174,6 +1259,7 @@ class VideoGeniusApp(ctk.CTk):
             "tts_backend": "tts_backend",
             "piper_executable_path": "piper_executable_path",
             "piper_model_path": "piper_model_path",
+            "avatar_source_image_path": "avatar_source_image_path",
         }
         for config_key, render_key in key_map.items():
             if config_key in updates:
@@ -1215,7 +1301,148 @@ class VideoGeniusApp(ctk.CTk):
                 message="FFmpeg prepared automatically.",
             )
 
-        if render_settings["provider"] != "Local AI video":
+        if render_settings["provider"] == "Storyboard local":
+            config_snapshot = self._build_runtime_config_snapshot(render_settings)
+            prep_result = self.setup_manager.prepare_environment(
+                config_snapshot,
+                install_missing=True,
+                install_default_checkpoint=True,
+                progress_callback=lambda value, message: self._queue_event(
+                    "progress",
+                    value=0.03 + (value * 0.15),
+                    message=message,
+                ),
+            )
+            updates = dict(prep_result.updates)
+            if ffmpeg_path:
+                updates["ffmpeg_path"] = ffmpeg_path
+
+            checkpoints = list(prep_result.status.checkpoints)
+            checkpoint_name = str(updates.get("comfyui_checkpoint") or render_settings["comfyui_checkpoint"]).strip()
+            workflow_path = str(updates.get("comfyui_workflow_path") or render_settings["comfyui_workflow_path"]).strip()
+            workflow_mode = self._describe_workflow_mode(workflow_path) if workflow_path else "missing"
+            if checkpoint_name and workflow_mode != "image":
+                updates["comfyui_workflow_path"] = str(
+                    self.setup_manager.ensure_default_workflow(
+                        checkpoint_name=checkpoint_name,
+                        aspect_ratio=str(render_settings["aspect_ratio"]),
+                    )
+                )
+
+            storyboard_ai_ready = prep_result.status.comfyui_reachable
+            if not storyboard_ai_ready:
+                self.setup_manager.ensure_package_installed(COMFYUI_PACKAGE_ID, install_missing=True)
+                if self.setup_manager.launch_application(
+                    "comfyui",
+                    gpu_choice=str(render_settings["render_gpu_preference"] or "Auto"),
+                    configured_url=str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
+                ):
+                    self._queue_event("progress", value=0.19, message="Opening ComfyUI automatically for storyboard visuals...")
+                ready, resolved_url, detected_checkpoints, _message = self.setup_manager.wait_for_comfyui(
+                    str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
+                    timeout_seconds=120,
+                    require_checkpoints=True,
+                )
+                if ready:
+                    storyboard_ai_ready = True
+                    checkpoints = detected_checkpoints
+                    updates["comfyui_base_url"] = resolved_url
+                    worker_urls = self.setup_manager.resolve_comfyui_worker_urls(
+                        str(updates.get("comfyui_worker_urls") or render_settings["comfyui_worker_urls"]),
+                        resolved_url,
+                    )
+                    updates["comfyui_worker_urls"] = ", ".join(worker_urls)
+                    updates["parallel_scene_workers"] = max(1, len(worker_urls))
+                    if detected_checkpoints and not checkpoint_name:
+                        checkpoint_name = detected_checkpoints[0]
+                        updates["comfyui_checkpoint"] = checkpoint_name
+                    if checkpoint_name:
+                        updates["comfyui_workflow_path"] = str(
+                            self.setup_manager.ensure_default_workflow(
+                                checkpoint_name=checkpoint_name,
+                                aspect_ratio=str(render_settings["aspect_ratio"]),
+                            )
+                        )
+
+            self._persist_runtime_updates(
+                render_settings,
+                updates,
+                message=(
+                    "Environment prepared automatically for storyboard shorts."
+                    if storyboard_ai_ready
+                    else "ComfyUI was not ready. Storyboard local will continue with local fallback visuals."
+                ),
+                checkpoints=checkpoints,
+            )
+            return render_settings
+
+        if render_settings["provider"] == "Local Avatar video":
+            self.setup_manager.download_default_avatar_vae(
+                progress_callback=lambda value, message: self._queue_event(
+                    "progress",
+                    value=0.03 + (value * 0.08),
+                    message=message,
+                ),
+            )
+            config_snapshot = self._build_runtime_config_snapshot(render_settings)
+            status = self.setup_manager.inspect_environment(config_snapshot)
+            updates: dict[str, Any] = {
+                "ffmpeg_path": ffmpeg_path or render_settings["ffmpeg_path"],
+                "comfyui_base_url": status.comfyui_base_url or render_settings["comfyui_base_url"],
+                "comfyui_worker_urls": ", ".join(status.comfyui_worker_urls),
+                "parallel_scene_workers": max(1, len(status.comfyui_worker_urls)),
+                "avatar_source_image_path": render_settings["avatar_source_image_path"],
+            }
+            workflow_path = str(render_settings["comfyui_workflow_path"]).strip()
+            workflow_mode = self._describe_workflow_mode(workflow_path) if workflow_path else "missing"
+            if workflow_mode != "video":
+                updates["comfyui_workflow_path"] = str(
+                    self.setup_manager.ensure_default_avatar_workflow(
+                        aspect_ratio=str(render_settings["aspect_ratio"]),
+                    )
+                )
+            local_avatar_ready = status.comfyui_reachable
+            if not local_avatar_ready:
+                self.setup_manager.ensure_package_installed(COMFYUI_PACKAGE_ID, install_missing=True)
+                if self.setup_manager.launch_application(
+                    "comfyui",
+                    gpu_choice=str(render_settings["render_gpu_preference"] or "Auto"),
+                    configured_url=str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
+                ):
+                    self._queue_event("progress", value=0.18, message="Opening ComfyUI automatically for avatar render...")
+                ready, resolved_url, _checkpoints, _message = self.setup_manager.wait_for_comfyui(
+                    str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
+                    timeout_seconds=120,
+                    require_checkpoints=False,
+                )
+                if ready:
+                    local_avatar_ready = True
+                    updates["comfyui_base_url"] = resolved_url
+                    worker_urls = self.setup_manager.resolve_comfyui_worker_urls(
+                        str(updates.get("comfyui_worker_urls") or render_settings["comfyui_worker_urls"]),
+                        resolved_url,
+                    )
+                    updates["comfyui_worker_urls"] = ", ".join(worker_urls)
+                    updates["parallel_scene_workers"] = max(1, len(worker_urls))
+            if not local_avatar_ready:
+                raise LocalAIVideoWorkflowError(
+                    "ComfyUI no estuvo listo para Local Avatar video. Abre ComfyUI, carga tu workflow de avatar/lipsync y vuelve a intentar."
+                )
+            avatar_nodes_ready, missing_avatar_nodes = self.setup_manager.comfyui_has_nodes(
+                str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
+                ["Echo_LoadModel", "Echo_Predata", "Echo_Sampler", "VHS_LoadAudio", "VHS_LoadImagePath", "VHS_VideoCombine"],
+            )
+            if not avatar_nodes_ready:
+                raise LocalAIVideoWorkflowError(
+                    "ComfyUI esta abierto, pero no cargo el stack de avatar requerido. "
+                    f"Faltan nodos: {', '.join(missing_avatar_nodes)}."
+                )
+            self._persist_runtime_updates(
+                render_settings,
+                updates,
+                message="Environment prepared automatically for avatar video.",
+                checkpoints=status.checkpoints,
+            )
             return render_settings
 
         config_snapshot = self._build_runtime_config_snapshot(render_settings)
@@ -1232,13 +1459,23 @@ class VideoGeniusApp(ctk.CTk):
         updates = dict(prep_result.updates)
         if ffmpeg_path:
             updates["ffmpeg_path"] = ffmpeg_path
+        workflow_path = str(updates.get("comfyui_workflow_path") or render_settings["comfyui_workflow_path"]).strip()
+        if workflow_path and self._describe_workflow_mode(workflow_path) == "image":
+            raise LocalAIVideoWorkflowError(
+                "La configuracion automatica solo encontro un workflow estatico de imagen. "
+                "Para 'Local AI video' debes elegir un workflow de ComfyUI que produzca clips o gifs reales."
+            )
 
         checkpoints = list(prep_result.status.checkpoints)
         local_ai_ready = prep_result.status.comfyui_reachable and bool(checkpoints or updates.get("comfyui_checkpoint"))
 
         if not local_ai_ready:
             self.setup_manager.ensure_package_installed(COMFYUI_PACKAGE_ID, install_missing=True)
-            if self.setup_manager.launch_application("comfyui"):
+            if self.setup_manager.launch_application(
+                "comfyui",
+                gpu_choice=str(render_settings["render_gpu_preference"] or "Auto"),
+                configured_url=str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
+            ):
                 self._queue_event("progress", value=0.19, message="Opening ComfyUI automatically...")
             ready, resolved_url, detected_checkpoints, _message = self.setup_manager.wait_for_comfyui(
                 str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
@@ -1266,6 +1503,11 @@ class VideoGeniusApp(ctk.CTk):
                     )
 
         workflow_path = str(updates.get("comfyui_workflow_path") or render_settings["comfyui_workflow_path"]).strip()
+        if workflow_path and self._describe_workflow_mode(workflow_path) == "image":
+            raise LocalAIVideoWorkflowError(
+                "El workflow disponible solo genera imagenes estaticas. "
+                "Para 'Local AI video' debes usar un workflow de ComfyUI que produzca clips o gifs reales."
+            )
         if not local_ai_ready or not workflow_path:
             updates["video_provider"] = "Storyboard local"
             self._persist_runtime_updates(
@@ -1287,6 +1529,15 @@ class VideoGeniusApp(ctk.CTk):
     def _queue_event(self, event_type: str, **payload: Any) -> None:
         self.task_queue.put({"type": event_type, **payload})
 
+    def _apply_gpu_options(self, gpu_names: list[str]) -> None:
+        if not hasattr(self, "render_gpu_combo"):
+            return
+        options = self.setup_manager.format_gpu_options(gpu_names)
+        current = self.render_gpu_var.get().strip() or "Auto"
+        self.render_gpu_combo.configure(values=options)
+        if current not in options:
+            self.render_gpu_var.set("Auto")
+
     def _run_in_background(self, label: str, worker: Callable[[], None]) -> None:
         if self.is_busy:
             self._set_status("A task is already running. Please wait.", error=True)
@@ -1295,17 +1546,24 @@ class VideoGeniusApp(ctk.CTk):
         self._toggle_busy_state(True)
         self._set_status(f"{label}...")
         self._set_progress_ui(0.02, label)
+        started_at = time.perf_counter()
+        self.logger.info("Background task started | task=%s", label)
 
         def runner() -> None:
             try:
                 worker()
             except Exception as exc:
-                self.logger.exception("Background task failed: %s", exc)
+                elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                self.logger.exception("Background task failed | task=%s | duration_ms=%s", label, elapsed_ms)
                 self._queue_event("error", message=str(exc))
+            else:
+                elapsed_ms = int((time.perf_counter() - started_at) * 1000)
+                self.logger.info("Background task finished | task=%s | duration_ms=%s", label, elapsed_ms)
             finally:
                 self._queue_event("done")
 
-        threading.Thread(target=runner, daemon=True).start()
+        thread_name = f"videogenius-{label.lower().replace(' ', '-')[:24]}"
+        threading.Thread(target=runner, daemon=True, name=thread_name).start()
 
     def _process_task_queue(self) -> None:
         try:
@@ -1350,12 +1608,16 @@ class VideoGeniusApp(ctk.CTk):
                             self.comfyui_worker_urls_var.set(str(updates.get("comfyui_worker_urls") or ""))
                         if "parallel_scene_workers" in updates:
                             self.parallel_scene_workers_var.set(str(updates.get("parallel_scene_workers") or "1"))
+                        if "render_gpu_preference" in updates:
+                            self.render_gpu_var.set(str(updates.get("render_gpu_preference") or "Auto"))
                         if "ffmpeg_path" in updates:
                             self.ffmpeg_path_var.set(str(updates.get("ffmpeg_path") or ""))
                         if "comfyui_checkpoint" in updates:
                             self.comfyui_checkpoint_var.set(str(updates.get("comfyui_checkpoint") or ""))
                         if "comfyui_workflow_path" in updates:
                             self.comfyui_workflow_path_var.set(str(updates.get("comfyui_workflow_path") or ""))
+                        if "avatar_source_image_path" in updates:
+                            self.avatar_source_image_path_var.set(str(updates.get("avatar_source_image_path") or ""))
                         if "video_provider" in updates:
                             self.video_provider_var.set(str(updates.get("video_provider") or "Storyboard local"))
                         if "tts_backend" in updates:
@@ -1364,6 +1626,9 @@ class VideoGeniusApp(ctk.CTk):
                             self.comfyui_negative_prompt_var.set(str(updates.get("comfyui_negative_prompt") or ""))
                     if checkpoint_values and hasattr(self, "comfyui_checkpoint_combo"):
                         self.comfyui_checkpoint_combo.configure(values=checkpoint_values)
+                    gpu_names = event.get("gpu_names", [])
+                    if isinstance(gpu_names, list):
+                        self._apply_gpu_options([str(item) for item in gpu_names if str(item).strip()])
                     if summary and hasattr(self, "setup_summary_label"):
                         self.setup_summary_label.configure(text=summary)
                     self._sync_video_provider_ui()
@@ -1517,7 +1782,7 @@ class VideoGeniusApp(ctk.CTk):
             return
 
         def worker() -> None:
-            status = self.setup_manager.inspect_environment(self.app_config)
+            status = self.setup_manager.inspect_environment(self._build_environment_config_snapshot())
             summary = "\n".join(status.summary_lines())
             self._queue_event(
                 "environment",
@@ -1528,6 +1793,7 @@ class VideoGeniusApp(ctk.CTk):
                     "comfyui_worker_urls": ", ".join(status.comfyui_worker_urls),
                     "parallel_scene_workers": max(1, len(status.comfyui_worker_urls)),
                 },
+                gpu_names=status.gpu_names,
                 message="Environment analysis updated.",
                 success=status.ffmpeg_ready or status.comfyui_reachable or status.lmstudio_installed,
             )
@@ -1537,7 +1803,7 @@ class VideoGeniusApp(ctk.CTk):
     def prepare_environment(self) -> None:
         def worker() -> None:
             result = self.setup_manager.prepare_environment(
-                self.app_config,
+                self._build_environment_config_snapshot(),
                 install_missing=True,
                 install_default_checkpoint=True,
                 progress_callback=lambda value, message: self._queue_event("progress", value=value, message=message),
@@ -1549,6 +1815,7 @@ class VideoGeniusApp(ctk.CTk):
                 summary="\n".join(result.status.summary_lines()),
                 checkpoints=result.status.checkpoints,
                 updates=result.updates,
+                gpu_names=result.status.gpu_names,
                 message="Automatic setup completed.",
                 success=result.status.ffmpeg_ready or result.status.workflow_ready or bool(result.status.comfyui_checkpoint),
             )
@@ -1584,12 +1851,13 @@ class VideoGeniusApp(ctk.CTk):
             updates["parallel_scene_workers"] = max(1, len(resolved_workers))
             self.config_manager.update(**updates)
             self.app_config = self.config_manager.config
-            status = self.setup_manager.inspect_environment(self.app_config)
+            status = self.setup_manager.inspect_environment(self._build_environment_config_snapshot())
             self._queue_event(
                 "environment",
                 summary="\n".join(status.summary_lines()),
                 checkpoints=status.checkpoints,
                 updates=updates,
+                gpu_names=status.gpu_names,
                 message="Recommended checkpoint installed. Restart ComfyUI if it was already open.",
                 success=True,
             )
@@ -1642,6 +1910,8 @@ class VideoGeniusApp(ctk.CTk):
             self._queue_event("progress", value=0.03, message="Preparing full video generation...")
             try:
                 render_settings_local = self._prepare_render_settings_for_full_video(dict(render_settings))
+            except LocalAIVideoWorkflowError:
+                raise
             except Exception as exc:
                 self.logger.warning("Automatic environment preparation failed, falling back to Storyboard local: %s", exc)
                 render_settings_local = dict(render_settings)
@@ -1700,6 +1970,8 @@ class VideoGeniusApp(ctk.CTk):
                         message=message,
                     ),
                 )
+            except LocalAIVideoWorkflowError:
+                raise
             except Exception as exc:
                 if render_request.provider != "Local AI video":
                     raise
@@ -1781,8 +2053,16 @@ class VideoGeniusApp(ctk.CTk):
         self._set_status("LM Studio was not found. Use 'Preparar entorno automatico' first.", error=True)
 
     def launch_comfyui(self) -> None:
-        if self.setup_manager.launch_application("comfyui"):
-            self._set_status("ComfyUI opened.")
+        gpu_choice = self.render_gpu_var.get().strip() or "Auto"
+        if self.setup_manager.launch_application(
+            "comfyui",
+            gpu_choice=gpu_choice,
+            configured_url=self.comfyui_base_url_var.get().strip(),
+        ):
+            if gpu_choice == "Auto":
+                self._set_status("ComfyUI opened.")
+            else:
+                self._set_status(f"ComfyUI opened with {gpu_choice}.")
             return
         self._set_status("ComfyUI was not found. Use 'Preparar entorno automatico' first.", error=True)
 
@@ -1797,6 +2077,17 @@ class VideoGeniusApp(ctk.CTk):
             self._save_gui_state()
             self._set_status(f"Output folder updated: {selected}", success=True)
 
+    def choose_avatar_image(self) -> None:
+        selected = filedialog.askopenfilename(
+            title="Select avatar source image",
+            filetypes=[("Image files", "*.png *.jpg *.jpeg *.webp"), ("All files", "*.*")],
+            initialdir=APP_ROOT,
+        )
+        if selected:
+            self.avatar_source_image_path_var.set(selected)
+            self._save_gui_state()
+            self._set_status(f"Avatar source image updated: {selected}", success=True)
+
     def choose_comfyui_workflow(self) -> None:
         selected = filedialog.askopenfilename(
             title="Select ComfyUI workflow JSON",
@@ -1806,7 +2097,19 @@ class VideoGeniusApp(ctk.CTk):
         if selected:
             self.comfyui_workflow_path_var.set(selected)
             self._save_gui_state()
-            self._set_status(f"ComfyUI workflow updated: {selected}", success=True)
+            workflow_mode = self._describe_workflow_mode(selected)
+            if workflow_mode == "video":
+                self._set_status(f"ComfyUI workflow updated: {selected}. Video output detected.", success=True)
+            elif workflow_mode == "image":
+                self._set_status(
+                    f"ComfyUI workflow updated: {selected}. Static image output detected; this is not valid for Local AI video or Local Avatar video.",
+                    error=True,
+                )
+            else:
+                self._set_status(
+                    f"ComfyUI workflow updated: {selected}. Output type could not be detected automatically.",
+                    success=True,
+                )
 
     def choose_piper_model(self) -> None:
         selected = filedialog.askopenfilename(

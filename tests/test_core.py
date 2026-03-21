@@ -1,19 +1,24 @@
 from __future__ import annotations
 
+import logging
 import tempfile
 import unittest
 import os
 from pathlib import Path
 from unittest import mock
 
-from videogenius_ai.comfyui_client import ComfyUIClient, _replace_placeholders
+from PIL import Image
+
+from videogenius_ai.comfyui_client import ComfyUIClient, _replace_placeholders, detect_workflow_output_mode
 from videogenius_ai.config import ConfigManager, sanitize_window_geometry
 from videogenius_ai.export_service import ExportService
 from videogenius_ai.generator_service import SceneGeneratorService
 from videogenius_ai.lmstudio_client import sort_models_for_generation
+from videogenius_ai.logging_utils import configure_logging
 from videogenius_ai.setup_manager import SetupManager
-from videogenius_ai.models import GenerationRequest
+from videogenius_ai.models import GenerationRequest, RenderedVideoResult
 from videogenius_ai.video_render_service import VideoRenderService
+from videogenius_ai.video_service import StoryboardVideoService
 from videogenius_ai.utils import parse_json_payload
 
 
@@ -164,6 +169,8 @@ class ConfigTests(unittest.TestCase):
                 comfyui_base_url="http://127.0.0.1:8188",
                 comfyui_worker_urls="http://127.0.0.1:8188, http://127.0.0.1:8189",
                 parallel_scene_workers=2,
+                render_gpu_preference="GPU 1: NVIDIA RTX 4080",
+                avatar_source_image_path=str(Path(temp_dir) / "avatar.png"),
             )
 
             reloaded = ConfigManager(config_path=config_path)
@@ -173,11 +180,80 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(reloaded.config.comfyui_base_url, "http://127.0.0.1:8188")
             self.assertEqual(reloaded.config.comfyui_worker_urls, "http://127.0.0.1:8188, http://127.0.0.1:8189")
             self.assertEqual(reloaded.config.parallel_scene_workers, 2)
+            self.assertEqual(reloaded.config.render_gpu_preference, "GPU 1: NVIDIA RTX 4080")
+            self.assertEqual(reloaded.config.avatar_source_image_path, str(Path(temp_dir) / "avatar.png"))
 
     def test_invalid_window_geometry_falls_back_to_default(self) -> None:
         self.assertEqual(sanitize_window_geometry("160x160+50+50"), "1460x900+80+40")
         self.assertEqual(sanitize_window_geometry("bad-value"), "1460x900+80+40")
         self.assertEqual(sanitize_window_geometry("1460x900+80+40"), "1460x900+80+40")
+
+
+class SetupManagerGpuTests(unittest.TestCase):
+    def test_format_gpu_options_and_parse_selected_index(self) -> None:
+        manager = SetupManager()
+        options = manager.format_gpu_options(["NVIDIA RTX 4080", "NVIDIA RTX 4090"])
+        self.assertEqual(options, ["Auto", "GPU 0: NVIDIA RTX 4080", "GPU 1: NVIDIA RTX 4090"])
+        self.assertIsNone(manager.gpu_index_from_choice("Auto"))
+        self.assertEqual(manager.gpu_index_from_choice("GPU 1: NVIDIA RTX 4090"), 1)
+        self.assertIsNone(manager.gpu_index_from_choice("Invalid"))
+
+    def test_launch_application_sets_selected_gpu_environment_for_comfyui(self) -> None:
+        manager = SetupManager()
+        with (
+            mock.patch.object(manager, "find_application_path", return_value=r"C:\Apps\ComfyUI.exe"),
+            mock.patch("videogenius_ai.setup_manager.subprocess.Popen") as popen_mock,
+        ):
+            launched = manager.launch_application("comfyui", gpu_choice="GPU 1: NVIDIA RTX 4090")
+
+        self.assertTrue(launched)
+        popen_mock.assert_called_once()
+        args, kwargs = popen_mock.call_args
+        self.assertEqual(args[0], [r"C:\Apps\ComfyUI.exe"])
+        self.assertEqual(kwargs["env"]["CUDA_DEVICE_ORDER"], "PCI_BUS_ID")
+        self.assertEqual(kwargs["env"]["CUDA_VISIBLE_DEVICES"], "1")
+        self.assertEqual(kwargs["env"]["HIP_VISIBLE_DEVICES"], "1")
+        self.assertEqual(kwargs["env"]["ROCR_VISIBLE_DEVICES"], "1")
+
+
+class LoggingTests(unittest.TestCase):
+    def test_configure_logging_writes_context_without_duplicate_handlers(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            log_path = Path(temp_dir) / "runtime" / "app.log"
+            root_name = "videogenius_ai_test_logging"
+            try:
+                logger = configure_logging(
+                    "worker",
+                    log_path=log_path,
+                    root_name=root_name,
+                    reset=True,
+                    install_exception_hooks=False,
+                )
+                logger.info("First message")
+                logger_again = configure_logging(
+                    "worker",
+                    log_path=log_path,
+                    root_name=root_name,
+                    install_exception_hooks=False,
+                )
+                logger_again.warning("Second message")
+
+                root_logger = logging.getLogger(root_name)
+                for handler in root_logger.handlers:
+                    handler.flush()
+
+                content = log_path.read_text(encoding="utf-8")
+                self.assertEqual(logger.name, f"{root_name}.worker")
+                self.assertEqual(len(root_logger.handlers), 1)
+                self.assertIn("First message", content)
+                self.assertIn("Second message", content)
+                self.assertIn(f"{root_name}.worker", content)
+                self.assertIn("MainThread", content)
+            finally:
+                root_logger = logging.getLogger(root_name)
+                for handler in list(root_logger.handlers):
+                    root_logger.removeHandler(handler)
+                    handler.close()
 
 
 class LocalVideoSupportTests(unittest.TestCase):
@@ -218,6 +294,7 @@ class LocalVideoSupportTests(unittest.TestCase):
         request = self._make_project()
         # Reuse the project only to ensure service construction stays lazy.
         self.assertEqual(renderer._normalize_provider("Unknown backend"), "Storyboard local")
+        self.assertEqual(renderer._normalize_provider("Local Avatar video"), "Local Avatar video")
         self.assertEqual(request.title, "Planetas raros")
 
     def test_placeholder_replacement_updates_nested_workflow(self) -> None:
@@ -237,6 +314,28 @@ class LocalVideoSupportTests(unittest.TestCase):
         self.assertEqual(replaced["2"]["inputs"]["negative"], "blurry, low quality")
         self.assertEqual(replaced["2"]["inputs"]["seed"], 12345)
 
+    def test_prepare_workflow_accepts_extra_avatar_replacements(self) -> None:
+        client = ComfyUIClient(base_url="http://127.0.0.1:8188")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            workflow_path = Path(temp_dir) / "avatar_workflow.json"
+            workflow_path.write_text(
+                '{"1": {"inputs": {"image": "__SOURCE_IMAGE__", "audio": "__AUDIO_FILE__", "text": "__PROMPT__"}}}',
+                encoding="utf-8",
+            )
+            prepared = client._prepare_workflow(
+                workflow_path,
+                prompt_text="Avatar prompt",
+                negative_prompt="",
+                output_prefix="avatar-scene",
+                extra_replacements={
+                    "__SOURCE_IMAGE__": "C:/avatar.png",
+                    "__AUDIO_FILE__": "C:/audio.wav",
+                },
+            )
+            self.assertEqual(prepared["1"]["inputs"]["image"], "C:/avatar.png")
+            self.assertEqual(prepared["1"]["inputs"]["audio"], "C:/audio.wav")
+            self.assertEqual(prepared["1"]["inputs"]["text"], "Avatar prompt")
+
     def test_default_workflow_contains_expected_placeholders(self) -> None:
         manager = SetupManager()
         payload = manager.build_default_workflow_payload(
@@ -248,6 +347,20 @@ class LocalVideoSupportTests(unittest.TestCase):
         self.assertEqual(payload["7"]["inputs"]["text"], "__NEGATIVE_PROMPT__")
         self.assertEqual(payload["3"]["inputs"]["seed"], "__SEED__")
         self.assertEqual(payload["9"]["inputs"]["filename_prefix"], "__OUTPUT_PREFIX__")
+
+    def test_default_avatar_workflow_contains_expected_placeholders(self) -> None:
+        manager = SetupManager()
+        payload = manager.build_default_avatar_workflow_payload(aspect_ratio="9:16")
+        self.assertEqual(payload["1"]["class_type"], "Echo_LoadModel")
+        self.assertEqual(payload["1"]["inputs"]["vae"], "sd-vae-ft-mse.safetensors")
+        self.assertFalse(payload["1"]["inputs"]["lowvram"])
+        self.assertEqual(payload["2"]["inputs"]["image"], "__AVATAR_IMAGE__")
+        self.assertEqual(payload["3"]["inputs"]["audio_file"], "__AUDIO_FILE__")
+        self.assertEqual(payload["4"]["inputs"]["prompt"], "__PROMPT__")
+        self.assertEqual(payload["4"]["inputs"]["width"], "__WIDTH__")
+        self.assertEqual(payload["4"]["inputs"]["length"], "__SCENE_FRAMES__")
+        self.assertEqual(payload["6"]["class_type"], "VHS_VideoCombine")
+        self.assertEqual(payload["6"]["inputs"]["filename_prefix"], "__OUTPUT_PREFIX__")
 
     def test_checkpoint_extraction_from_object_info_payload(self) -> None:
         client = ComfyUIClient(base_url="http://127.0.0.1:8188")
@@ -263,6 +376,91 @@ class LocalVideoSupportTests(unittest.TestCase):
             }
         )
         self.assertEqual(checkpoints, ["model-a.safetensors", "model-b.safetensors"])
+
+    def test_detect_workflow_output_mode_distinguishes_image_and_video_outputs(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "image_workflow.json"
+            image_path.write_text(
+                '{"1": {"class_type": "CheckpointLoaderSimple"}, "9": {"class_type": "SaveImage"}}',
+                encoding="utf-8",
+            )
+            video_path = Path(temp_dir) / "video_workflow.json"
+            video_path.write_text(
+                '{"1": {"class_type": "CheckpointLoaderSimple"}, "9": {"class_type": "VHS_VideoCombine"}}',
+                encoding="utf-8",
+            )
+
+            self.assertEqual(detect_workflow_output_mode(image_path), "image")
+            self.assertEqual(detect_workflow_output_mode(video_path), "video")
+
+    def test_storyboard_prompt_targets_vertical_short_visuals(self) -> None:
+        service = StoryboardVideoService()
+        project = self._make_project()
+        prompt = service._scene_prompt(project, 0, "9:16")  # type: ignore[attr-defined]
+        self.assertIn("vertical 9:16 short-form social video frame", prompt)
+        self.assertIn("no text overlay", prompt)
+        self.assertIn("Planeta gigante", prompt)
+
+    def test_storyboard_fallback_frames_respect_requested_size(self) -> None:
+        service = StoryboardVideoService()
+        project = self._make_project()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_paths = service.render_storyboards(project, temp_dir, size=(720, 1280))
+            self.assertEqual(len(image_paths), 3)
+            with Image.open(image_paths[0]) as frame:
+                self.assertEqual(frame.size, (720, 1280))
+
+    def test_build_video_routes_legacy_calls_through_narrated_storyboard_render(self) -> None:
+        service = StoryboardVideoService()
+        project = self._make_project()
+        captured: dict[str, object] = {}
+        expected_output = Path("D:/tmp/legacy-storyboard.mp4")
+        fake_frames = [Path("D:/tmp/frame01.png"), Path("D:/tmp/frame02.png"), Path("D:/tmp/frame03.png")]
+
+        def fake_render(request, progress_callback=None, image_paths=None):  # type: ignore[no-untyped-def]
+            captured["request"] = request
+            captured["image_paths"] = image_paths
+            return RenderedVideoResult(provider="Storyboard local", file_path=expected_output)
+
+        service.render = fake_render  # type: ignore[method-assign]
+
+        output = service.build_video(
+            project,
+            "D:/tmp/out",
+            image_paths=fake_frames,
+            ffmpeg_path="C:/ffmpeg.exe",
+        )
+
+        self.assertEqual(output, expected_output)
+        request = captured["request"]
+        assert hasattr(request, "provider")
+        self.assertEqual(request.provider, "Storyboard local")
+        self.assertEqual(request.aspect_ratio, "9:16")
+        self.assertTrue(request.render_captions)
+        self.assertEqual(request.tts_backend, "Windows local")
+        self.assertEqual(request.ffmpeg_path, "C:/ffmpeg.exe")
+        self.assertEqual(captured["image_paths"], fake_frames)
+
+    def test_wait_for_completion_raises_immediately_on_execution_error(self) -> None:
+        client = ComfyUIClient(base_url="http://127.0.0.1:8188")
+        client._get = lambda path: {  # type: ignore[method-assign]
+            "prompt-1": {
+                "outputs": {},
+                "status": {
+                    "messages": [
+                        [
+                            "execution_error",
+                            {
+                                "node_type": "Echo_LoadModel",
+                                "exception_message": "Please install accelerate via `pip install accelerate`",
+                            },
+                        ]
+                    ]
+                },
+            }
+        }
+        with self.assertRaisesRegex(RuntimeError, "Echo_LoadModel"):
+            client.wait_for_completion("prompt-1", poll_interval_seconds=1, max_wait_seconds=3)
 
     def test_resolve_comfyui_base_url_checks_desktop_port_first(self) -> None:
         manager = SetupManager()
@@ -301,6 +499,8 @@ class LocalVideoSupportTests(unittest.TestCase):
                 manager = SetupManager()
                 config_path = manager.ensure_extra_models_config()
                 content = config_path.read_text(encoding="utf-8")
+                self.assertIn("VideoGeniusAI desktop paths begin", content)
+                self.assertIn("custom_nodes: custom_nodes", content)
                 self.assertIn("VideoGeniusAI managed models begin", content)
                 self.assertIn("checkpoints: checkpoints", content)
         finally:

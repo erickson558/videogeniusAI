@@ -10,7 +10,7 @@ from .utils import parse_json_payload, safe_int
 
 ProgressCallback = Callable[[float, str], None]
 
-LOGGER = configure_logging()
+LOGGER = configure_logging(__name__)
 
 
 class SceneGeneratorService:
@@ -250,6 +250,14 @@ class SceneGeneratorService:
         retry_attempts: int,
         progress_callback: ProgressCallback | None = None,
     ) -> VideoProject:
+        self.logger.info(
+            "Starting LM Studio project generation | model=%s | scenes=%s | duration_seconds=%s | language=%s | mode=%s",
+            request.model or "<auto>",
+            request.scene_count,
+            request.total_duration_seconds,
+            request.output_language,
+            request.generation_mode,
+        )
         if progress_callback:
             progress_callback(0.05, "Preparing generation prompt...")
 
@@ -277,6 +285,11 @@ class SceneGeneratorService:
 
                 payload = parse_json_payload(raw_response)
                 project = self.normalize_project(payload, request, raw_response)
+                self.logger.info(
+                    "Project generation completed | title=%s | scenes=%s",
+                    project.title,
+                    len(project.scenes),
+                )
 
                 if progress_callback:
                     progress_callback(1.0, "Project generated successfully.")
@@ -287,4 +300,5 @@ class SceneGeneratorService:
                 self.logger.warning("Generation attempt %s failed: %s", attempt, exc)
 
         assert last_error is not None
+        self.logger.error("Project generation exhausted all retries | attempts=%s", retry_attempts)
         raise last_error
