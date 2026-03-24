@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import random
+import re
 from typing import Any, Callable
 
 from .lmstudio_client import LMStudioClient
@@ -17,6 +19,86 @@ LOGGER = configure_logging(__name__)
 class SceneGeneratorService:
     def __init__(self) -> None:
         self.logger = LOGGER
+
+    def _brief_focus(self, topic: str) -> str:
+        cleaned_lines = []
+        for raw_line in str(topic or "").splitlines():
+            line = raw_line.strip().strip("-* ").strip()
+            if not line:
+                continue
+            line = re.sub(r"^(topic|tema)\s*:\s*", "", line, flags=re.IGNORECASE)
+            line = re.sub(r"^(video|vídeo)\s+(about|sobre)\s+", "", line, flags=re.IGNORECASE)
+            cleaned_lines.append(line)
+
+        if not cleaned_lines:
+            return "your idea"
+
+        instruction_prefixes = (
+            "generate ",
+            "create ",
+            "make ",
+            "write ",
+            "turn ",
+            "use ",
+            "include ",
+            "ensure ",
+            "do not ",
+            "change ",
+            "vary ",
+        )
+        for line in cleaned_lines:
+            lowered = line.casefold()
+            if lowered.startswith(instruction_prefixes):
+                continue
+            return line[:120]
+        return cleaned_lines[0][:120]
+
+    def _extract_brief_options(self, topic: str, *markers: str) -> list[str]:
+        for raw_line in str(topic or "").splitlines():
+            line = raw_line.strip().strip("-* ").strip()
+            if not line:
+                continue
+            lowered = line.casefold()
+            for marker in markers:
+                marker_lower = marker.casefold()
+                if marker_lower not in lowered:
+                    continue
+                if ":" in line:
+                    tail = line.split(":", 1)[1]
+                else:
+                    tail = line
+                options = [
+                    item.strip().strip(".")
+                    for item in re.split(r",|/|;|\bor\b|\bo\b", tail, flags=re.IGNORECASE)
+                    if item.strip()
+                ]
+                filtered = [item for item in options if len(item) >= 3]
+                if filtered:
+                    return filtered
+        return []
+
+    def _pick_brief_option(self, options: list[str]) -> str:
+        if not options:
+            return ""
+        return random.SystemRandom().choice(options)
+
+    def _theme_seed(self, topic_focus: str) -> str:
+        text = topic_focus.casefold()
+        theme_map = {
+            ("nature", "naturaleza", "forest", "selva"): "a vast bioluminescent rainforest with towering waterfalls and drifting mist",
+            ("technology", "tecnología", "tech", "ai", "robot"): "a futuristic AI metropolis filled with holograms, robotics, and glowing data architecture",
+            ("food", "comida", "cocina", "kitchen"): "a hyper-detailed gourmet world with sizzling street food, vapor, and cinematic close-ups",
+            ("travel", "viaje", "turismo"): "an epic travel montage across neon cities, mountain roads, and impossible skylines",
+            ("sports", "deportes", "sport"): "an intense sports arena with explosive motion, sweat, speed, and dramatic lighting",
+            ("fantasy", "fantasía", "magic"): "a mythical fantasy kingdom with colossal ruins, magical energy, and heroic scale",
+            ("science fiction", "sci-fi", "ciencia ficción"): "a science-fiction universe with spacecraft, alien megastructures, and impossible cosmic vistas",
+            ("historical", "history", "histórico"): "a cinematic historical world with monumental architecture, dense atmosphere, and period detail",
+            ("abstract", "arte abstracto", "abstract art"): "an abstract dreamscape of impossible geometry, liquid color, and surreal motion",
+        }
+        for keys, hint in theme_map.items():
+            if any(key in text for key in keys):
+                return hint
+        return f"a striking cinematic world centered on {topic_focus}"
 
     def _fallback_language_pack(self, output_language: str) -> dict[str, str | list[str]]:
         normalized = (output_language or "").strip().lower()
@@ -125,22 +207,50 @@ class SceneGeneratorService:
 
         scenes: list[dict[str, Any]] = []
         default_duration = max(1, request.total_duration_seconds // max(1, request.scene_count))
-        topic_excerpt = request.topic.strip().replace("\n", " ")
-        short_topic = topic_excerpt[:120] or "your idea"
+        theme_options = self._extract_brief_options(
+            request.topic,
+            "vary the theme randomly",
+            "tema aleatorio",
+            "theme randomly",
+        )
+        style_options = self._extract_brief_options(
+            request.topic,
+            "use a different visual style each time",
+            "visual style each time",
+            "estilo visual",
+        )
+        short_topic = self._pick_brief_option(theme_options) or self._brief_focus(request.topic)
+        style_hint = self._pick_brief_option(style_options)
+        effective_visual_style = request.visual_style if not style_hint else f"{request.visual_style}, {style_hint}"
+        theme_seed = self._theme_seed(short_topic)
+        fallback_request = GenerationRequest(
+            topic=short_topic,
+            visual_style=effective_visual_style,
+            audience=request.audience,
+            narrative_tone=request.narrative_tone,
+            video_format=request.video_format,
+            output_language=request.output_language,
+            total_duration_seconds=request.total_duration_seconds,
+            scene_count=request.scene_count,
+            generation_mode=request.generation_mode,
+            model=request.model,
+            temperature=request.temperature,
+            max_tokens=request.max_tokens,
+        )
 
         for index in range(request.scene_count):
             title = str(scene_titles[min(index, len(scene_titles) - 1)])
             description = (
-                f"{pack['description_prefix']} {index + 1} focused on {short_topic}. "
+                f"{pack['description_prefix']} {index + 1} focused on {short_topic}, featuring {theme_seed}. "
                 f"Keep the tone {request.narrative_tone.lower()} and adapt it for {request.audience.lower()}."
             )
-            direction = self._fallback_scene_direction(request, index)
+            direction = self._fallback_scene_direction(fallback_request, index)
             narration = (
                 f"{pack['narration_prefix']} {index + 1}, present a clear part of {short_topic} "
                 f"for a {request.video_format} in {request.output_language}."
             )
             visual_prompt = (
-                f"{request.visual_style}, {request.video_format}, scene {index + 1}, {short_topic}, "
+                f"{effective_visual_style}, {request.video_format}, scene {index + 1}, {short_topic}, {theme_seed}, "
                 f"cinematic composition, {direction['lighting_style']}, {direction['color_palette']}, high detail"
             )
             scenes.append(
@@ -160,7 +270,7 @@ class SceneGeneratorService:
                     "energy_level": direction["energy_level"],
                     "negative_prompt": "",
                     "shots": self._fallback_shots_for_scene(
-                        request=request,
+                        request=fallback_request,
                         scene_index=index,
                         scene_title=title,
                         scene_description=description,
@@ -242,12 +352,15 @@ class SceneGeneratorService:
             "Think like a cinematic AI film director for faceless, visually rich short videos. "
             "Return only valid JSON. No markdown. No commentary. "
             "Do not include reasoning, analysis, or <think> blocks. "
-            "Keep scene numbering sequential and durations realistic."
+            "Keep scene numbering sequential and durations realistic. "
+            "Treat the user input as a creative brief, not as narration to repeat literally."
         )
 
+        topic_focus = self._brief_focus(request.topic)
         user_message = (
             "Create a video project in JSON for the following request.\n"
-            f"Topic: {request.topic}\n"
+            f"Primary theme to develop: {topic_focus}\n"
+            f"Source brief:\n{request.topic}\n"
             f"Visual style: {request.visual_style}\n"
             f"Audience: {request.audience}\n"
             f"Narrative tone: {request.narrative_tone}\n"
@@ -262,6 +375,8 @@ class SceneGeneratorService:
             "- Distribute the total duration across all scenes.\n"
             "- Make scene titles concise.\n"
             "- Make narration ready to read aloud.\n"
+            "- Build the video around one clear theme derived from the brief instead of repeating the brief word for word.\n"
+            "- Do not narrate operational prompt phrases like 'generate a unique YouTube Shorts video', 'this prompt', or 'every time this prompt is run' unless the requested topic is explicitly prompt engineering.\n"
             "- For each scene, include cinematic_intent, camera_language, lighting_style, color_palette, energy_level, and negative_prompt.\n"
             "- Unless the mode is 'Solo guion', include 2 to 4 shots per scene with concrete camera direction and visually imaginative prompts.\n"
             "- Make the visuals feel premium, vivid, and cinematic instead of generic stock footage.\n"

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, replace
 import json
 import os
 import queue
@@ -19,14 +19,17 @@ from .comfyui_client import ComfyUIClient, detect_workflow_output_mode
 from .config import AppConfig, ConfigManager, sanitize_window_geometry
 from .export_service import ExportService
 from .generator_service import SceneGeneratorService
+from .gpu_detector import GPUDetectionResult, GPUDetector
 from .history_service import HistoryEntry, HistoryService
+from .i18n import SUPPORTED_UI_LANGUAGES, TranslationManager, ui_language_code_from_label, ui_language_label
 from .local_ai_video_service import LocalAIVideoWorkflowError
 from .lmstudio_client import LMStudioClient
 from .logging_utils import configure_logging
 from .models import GenerationRequest, VideoProject, VideoRenderRequest
 from .paths import APP_ROOT
 from .prompt_director import summarize_scene_shots
-from .setup_manager import COMFYUI_PACKAGE_ID, LM_STUDIO_PACKAGE_ID, SetupManager
+from .render_devices import describe_render_selection
+from .setup_manager import COMFYUI_PACKAGE_ID, LM_STUDIO_PACKAGE_ID, SetupManager, SetupStatus
 from .version import APP_NAME, DISPLAY_VERSION
 from .video_render_service import VideoRenderService
 
@@ -65,6 +68,84 @@ ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
+@dataclass
+class UIStateSnapshot:
+    topic_text: str = ""
+    setup_summary: str = ""
+    status_text: str = ""
+    status_color: Any = None
+    connection_chip: str = ""
+    render_chip: str = ""
+    progress_value: float = 0.0
+    progress_percent: str = ""
+    progress_detail: str = ""
+    countdown_text: str = ""
+
+
+class HoverToolTip:
+    def __init__(self, widget: tk.Widget, text_provider: Callable[[], str]) -> None:
+        self.widget = widget
+        self.text_provider = text_provider
+        self.tooltip_window: tk.Toplevel | None = None
+        self._show_job: str | None = None
+        widget.bind("<Enter>", self._schedule_show, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule_show(self, _event: tk.Event | None = None) -> None:
+        self._cancel_scheduled_show()
+        self._show_job = self.widget.after(320, self._show)
+
+    def _cancel_scheduled_show(self) -> None:
+        if self._show_job:
+            try:
+                self.widget.after_cancel(self._show_job)
+            except tk.TclError:
+                pass
+            self._show_job = None
+
+    def _show(self) -> None:
+        self._show_job = None
+        text = self.text_provider().strip()
+        if not text:
+            return
+        self._hide()
+        try:
+            x_pos = self.widget.winfo_rootx() + 18
+            y_pos = self.widget.winfo_rooty() + self.widget.winfo_height() + 10
+            tooltip = tk.Toplevel(self.widget)
+            tooltip.wm_overrideredirect(True)
+            tooltip.attributes("-topmost", True)
+            tooltip.configure(bg="#0F172A")
+            label = tk.Label(
+                tooltip,
+                text=text,
+                justify="left",
+                wraplength=320,
+                padx=10,
+                pady=8,
+                bg="#0F172A",
+                fg="#E2E8F0",
+                relief="solid",
+                borderwidth=1,
+                font=("Segoe UI", 9),
+            )
+            label.pack()
+            tooltip.geometry(f"+{x_pos}+{y_pos}")
+            self.tooltip_window = tooltip
+        except tk.TclError:
+            self.tooltip_window = None
+
+    def _hide(self, _event: tk.Event | None = None) -> None:
+        self._cancel_scheduled_show()
+        if self.tooltip_window is not None:
+            try:
+                self.tooltip_window.destroy()
+            except tk.TclError:
+                pass
+            self.tooltip_window = None
+
+
 class VideoGeniusApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
@@ -77,8 +158,10 @@ class VideoGeniusApp(ctk.CTk):
         self.logger = configure_logging(__name__)
         self.config_manager = ConfigManager()
         self.app_config: AppConfig = self.config_manager.config
+        self.translator = TranslationManager(self.app_config.ui_language)
         ctk.set_appearance_mode(self._normalize_appearance_mode(self.app_config.appearance_mode))
         self.setup_manager = SetupManager()
+        self.gpu_detector = GPUDetector()
         self.generator_service = SceneGeneratorService()
         self.history_service = HistoryService()
         self.export_service = ExportService()
@@ -101,18 +184,23 @@ class VideoGeniusApp(ctk.CTk):
         self._auto_start_job_id: str | None = None
         self._zoom_job_id: str | None = None
         self._auto_close_trigger_job_id: str | None = None
+        self._render_capabilities_job_id: str | None = None
+        self._render_summary_job_id: str | None = None
         self._auto_close_remaining = max(1, int(self.app_config.auto_close_seconds))
+        self._last_gpu_detection: GPUDetectionResult | None = None
+        self._tooltips: list[HoverToolTip] = []
 
         self._configure_root()
         self._create_variables()
         self._build_menu()
         self._build_layout()
+        self._populate_detected_gpu_options()
         self._sync_video_provider_ui()
         self._sync_tts_ui()
         self._bind_shortcuts()
         self._bind_activity_reset()
         self._load_history_buttons()
-        self._set_status("Ready. Configure LM Studio and generate a project.")
+        self._set_status(self.t("app.ready"))
         self._schedule_initial_window_show()
         self._process_queue_job_id = self.after(150, self._process_task_queue)
         self._countdown_job_id = self.after(1000, self._tick_auto_close)
@@ -190,18 +278,150 @@ class VideoGeniusApp(ctk.CTk):
             return "dark"
         return normalized
 
+    def t(self, key: str, **kwargs: Any) -> str:
+        return self.translator.translate(key, **kwargs)
+
+    def _appearance_choice_map(self) -> dict[str, str]:
+        return {
+            self.t("appearance.light"): "light",
+            self.t("appearance.dark"): "dark",
+            self.t("appearance.system"): "system",
+        }
+
     def _appearance_label_to_mode(self, value: str) -> str:
-        mapping = {"Claro": "light", "Oscuro": "dark", "Sistema": "system"}
+        mapping = self._appearance_choice_map()
         return mapping.get(value, self._normalize_appearance_mode(value))
 
     def _appearance_mode_to_label(self, value: str) -> str:
-        mapping = {"light": "Claro", "dark": "Oscuro", "system": "Sistema"}
-        return mapping.get(self._normalize_appearance_mode(value), "Oscuro")
+        normalized = self._normalize_appearance_mode(value)
+        reverse_mapping = {mode: label for label, mode in self._appearance_choice_map().items()}
+        return reverse_mapping.get(normalized, self.t("appearance.dark"))
 
     def _apply_user_appearance_mode(self, mode: str) -> None:
         ctk.set_appearance_mode(self._normalize_appearance_mode(mode))
 
+    def _ui_language_options(self) -> list[str]:
+        return list(SUPPORTED_UI_LANGUAGES.values())
+
+    def _selected_ui_language_code(self) -> str:
+        return ui_language_code_from_label(self.ui_language_var.get())
+
+    def _capture_ui_state(self) -> UIStateSnapshot:
+        snapshot = UIStateSnapshot()
+        if hasattr(self, "topic_text"):
+            try:
+                snapshot.topic_text = self.topic_text.get("1.0", "end-1c")
+            except tk.TclError:
+                snapshot.topic_text = ""
+        if hasattr(self, "setup_summary_label"):
+            snapshot.setup_summary = str(self.setup_summary_label.cget("text"))
+        if hasattr(self, "status_label"):
+            snapshot.status_text = str(self.status_label.cget("text"))
+            snapshot.status_color = self.status_label.cget("text_color")
+        if hasattr(self, "connection_chip"):
+            snapshot.connection_chip = str(self.connection_chip.cget("text"))
+        if hasattr(self, "render_chip"):
+            snapshot.render_chip = str(self.render_chip.cget("text"))
+        if hasattr(self, "progress_bar"):
+            snapshot.progress_value = float(self.progress_bar.get())
+        if hasattr(self, "progress_percent_label"):
+            snapshot.progress_percent = str(self.progress_percent_label.cget("text"))
+        if hasattr(self, "progress_detail_label"):
+            snapshot.progress_detail = str(self.progress_detail_label.cget("text"))
+        if hasattr(self, "countdown_label"):
+            snapshot.countdown_text = str(self.countdown_label.cget("text"))
+        return snapshot
+
+    def _format_setup_summary(self, status: SetupStatus) -> str:
+        lines = [
+            f"LM Studio: {'Ready' if status.lmstudio_installed else 'Pending'}" if self._selected_ui_language_code() == "en" else f"LM Studio: {'Listo' if status.lmstudio_installed else 'Pendiente'}",
+            f"ComfyUI Desktop: {'Ready' if status.comfyui_installed else 'Pending'}" if self._selected_ui_language_code() == "en" else f"ComfyUI Desktop: {'Listo' if status.comfyui_installed else 'Pendiente'}",
+            f"FFmpeg: {'Ready' if status.ffmpeg_ready else 'Pending'}" if self._selected_ui_language_code() == "en" else f"FFmpeg: {'Listo' if status.ffmpeg_ready else 'Pendiente'}",
+            f"ComfyUI API: {'Connected' if status.comfyui_reachable else 'Offline'}" if self._selected_ui_language_code() == "en" else f"ComfyUI API: {'Conectado' if status.comfyui_reachable else 'Sin conexion'}",
+            f"Automatic workflow: {'Ready' if status.workflow_ready else 'Pending'}" if self._selected_ui_language_code() == "en" else f"Workflow automatico: {'Listo' if status.workflow_ready else 'Pendiente'}",
+            f"Windows local voice: {'Available' if status.windows_tts_ready else 'Unavailable'}" if self._selected_ui_language_code() == "en" else f"Voz local de Windows: {'Disponible' if status.windows_tts_ready else 'No disponible'}",
+        ]
+        if status.gpu_names:
+            lines.append(f"GPUs detected: {len(status.gpu_names)}" if self._selected_ui_language_code() == "en" else f"GPUs detectadas: {len(status.gpu_names)}")
+        if status.comfyui_checkpoint:
+            lines.append(f"Visual model: {status.comfyui_checkpoint}" if self._selected_ui_language_code() == "en" else f"Modelo visual: {status.comfyui_checkpoint}")
+        if status.comfyui_base_url:
+            lines.append(f"ComfyUI URL: {status.comfyui_base_url}")
+        if status.comfyui_worker_urls:
+            lines.append(f"ComfyUI workers: {len(status.comfyui_worker_urls)}" if self._selected_ui_language_code() == "en" else f"Workers ComfyUI: {len(status.comfyui_worker_urls)}")
+        if status.model_folder:
+            lines.append(f"Shared models: {status.model_folder}" if self._selected_ui_language_code() == "en" else f"Modelos compartidos: {status.model_folder}")
+        if status.notes:
+            lines.extend(status.notes)
+        return "\n".join(lines)
+
+    def _restore_ui_state(self, snapshot: UIStateSnapshot) -> None:
+        if hasattr(self, "topic_text") and snapshot.topic_text:
+            self.topic_text.delete("1.0", "end")
+            self.topic_text.insert("1.0", snapshot.topic_text)
+        if hasattr(self, "setup_summary_label") and snapshot.setup_summary:
+            self.setup_summary_label.configure(text=snapshot.setup_summary)
+        if hasattr(self, "status_label") and snapshot.status_text:
+            self.status_label.configure(text=snapshot.status_text)
+            if snapshot.status_color is not None:
+                self.status_label.configure(text_color=snapshot.status_color)
+        if hasattr(self, "connection_chip") and snapshot.connection_chip:
+            self.connection_chip.configure(text=snapshot.connection_chip)
+        if hasattr(self, "render_chip") and snapshot.render_chip:
+            self.render_chip.configure(text=snapshot.render_chip)
+        if hasattr(self, "progress_bar"):
+            self.progress_bar.set(snapshot.progress_value)
+        if hasattr(self, "progress_percent_label") and snapshot.progress_percent:
+            self.progress_percent_label.configure(text=snapshot.progress_percent)
+        if hasattr(self, "progress_detail_label") and snapshot.progress_detail:
+            self.progress_detail_label.configure(text=snapshot.progress_detail)
+        if hasattr(self, "countdown_label") and snapshot.countdown_text:
+            self.countdown_label.configure(text=snapshot.countdown_text)
+
+    def _rebuild_translated_ui(self) -> None:
+        snapshot = self._capture_ui_state()
+        self._tooltips = []
+        for widget_name in ["sidebar", "main_panel", "status_bar"]:
+            widget = getattr(self, widget_name, None)
+            if widget is not None:
+                widget.destroy()
+        self._build_menu()
+        self._build_layout()
+        self._populate_detected_gpu_options()
+        self._sync_video_provider_ui()
+        self._sync_tts_ui()
+        self._load_history_buttons()
+        if self.current_project:
+            self._render_project(self.current_project)
+        self._restore_ui_state(snapshot)
+        if not snapshot.status_text:
+            self._set_status(self.t("app.ready"))
+        if not snapshot.setup_summary and hasattr(self, "setup_summary_label"):
+            self.setup_summary_label.configure(text=self.t("status.setup_summary_initial"))
+        if not snapshot.connection_chip:
+            self.connection_chip.configure(text=self.t("status.testing_connection"))
+        if not snapshot.render_chip:
+            self.render_chip.configure(text=self.t("status.render_chip", provider=self.video_provider_var.get()))
+        if not snapshot.progress_detail:
+            self._set_progress_ui(0, self.t("progress.waiting_detail"))
+        self._update_countdown_label()
+
+    def _on_ui_language_change(self) -> None:
+        language_code = self._selected_ui_language_code()
+        if language_code == self.app_config.ui_language:
+            return
+        current_appearance_mode = self._appearance_label_to_mode(self.appearance_mode_var.get())
+        self.translator.set_language(language_code)
+        self.ui_language_var.set(ui_language_label(language_code))
+        self.appearance_mode_var.set(self._appearance_mode_to_label(current_appearance_mode))
+        self.config_manager.update(ui_language=language_code)
+        self.app_config = self.config_manager.config
+        self._rebuild_translated_ui()
+        self._schedule_save()
+        self._set_status(self.t("status.interface_language_updated", language=self.ui_language_var.get()), success=True)
+
     def _create_variables(self) -> None:
+        self.ui_language_var = tk.StringVar(value=ui_language_label(self.app_config.ui_language))
         self.appearance_mode_var = tk.StringVar(value=self._appearance_mode_to_label(self.app_config.appearance_mode))
         self.base_url_var = tk.StringVar(value=self.app_config.lmstudio_base_url)
         self.model_var = tk.StringVar(value=self.app_config.model)
@@ -213,6 +433,8 @@ class VideoGeniusApp(ctk.CTk):
         self.comfyui_worker_urls_var = tk.StringVar(value=self.app_config.comfyui_worker_urls)
         self.parallel_scene_workers_var = tk.StringVar(value=str(self.app_config.parallel_scene_workers))
         self.render_gpu_var = tk.StringVar(value=self.app_config.render_gpu_preference or "Auto")
+        self.video_render_device_var = tk.StringVar(value=self.app_config.video_render_device_preference or "Auto")
+        self.video_encoder_var = tk.StringVar(value=self.app_config.video_encoder_preference or "Auto")
         self.comfyui_checkpoint_var = tk.StringVar(value=self.app_config.comfyui_checkpoint)
         self.comfyui_workflow_path_var = tk.StringVar(value=self.app_config.comfyui_workflow_path)
         self.comfyui_negative_prompt_var = tk.StringVar(value=self.app_config.comfyui_negative_prompt)
@@ -252,6 +474,8 @@ class VideoGeniusApp(ctk.CTk):
             self.comfyui_worker_urls_var,
             self.parallel_scene_workers_var,
             self.render_gpu_var,
+            self.video_render_device_var,
+            self.video_encoder_var,
             self.comfyui_checkpoint_var,
             self.comfyui_workflow_path_var,
             self.comfyui_negative_prompt_var,
@@ -281,41 +505,50 @@ class VideoGeniusApp(ctk.CTk):
             variable.trace_add("write", lambda *_: self._schedule_save())
 
         self.tts_backend_var.trace_add("write", lambda *_: self._sync_tts_ui())
+        self.video_render_device_var.trace_add("write", lambda *_: self._schedule_render_selection_summary_update())
+        self.video_encoder_var.trace_add("write", lambda *_: self._schedule_render_selection_summary_update())
+        self.ffmpeg_path_var.trace_add("write", lambda *_: self._schedule_render_capability_refresh())
 
     def _build_menu(self) -> None:
         menu_bar = tk.Menu(self)
 
         file_menu = tk.Menu(menu_bar, tearoff=0)
-        file_menu.add_command(label="Nuevo", accelerator="Ctrl+N", command=self.reset_form)
-        file_menu.add_command(label="Analizar entorno", accelerator="Ctrl+I", command=self.inspect_environment)
-        file_menu.add_command(label="Preparar entorno automatico", accelerator="Ctrl+Shift+I", command=self.prepare_environment)
-        file_menu.add_command(label="Probar conexion", accelerator="Ctrl+L", command=self.test_connection)
-        file_menu.add_command(label="Probar ComfyUI", accelerator="Ctrl+H", command=self.test_local_video_connection)
-        file_menu.add_command(label="Generar guion", accelerator="Ctrl+G", command=self.start_generation)
-        file_menu.add_command(label="Generar video completo", accelerator="Ctrl+Shift+G", command=self.generate_full_video)
+        file_menu.add_command(label=self.t("menu.items.new"), accelerator="Ctrl+N", command=self.reset_form)
+        file_menu.add_command(label=self.t("menu.items.inspect_environment"), accelerator="Ctrl+I", command=self.inspect_environment)
+        file_menu.add_command(label=self.t("menu.items.prepare_environment"), accelerator="Ctrl+Shift+I", command=self.prepare_environment)
+        file_menu.add_command(label=self.t("menu.items.test_connection"), accelerator="Ctrl+L", command=self.test_connection)
+        file_menu.add_command(label=self.t("menu.items.test_comfyui"), accelerator="Ctrl+H", command=self.test_local_video_connection)
+        file_menu.add_command(label=self.t("menu.items.generate_script"), accelerator="Ctrl+G", command=self.start_generation)
+        file_menu.add_command(label=self.t("menu.items.generate_full_video"), accelerator="Ctrl+Shift+G", command=self.generate_full_video)
         file_menu.add_separator()
-        file_menu.add_command(label="Exportar JSON", accelerator="Ctrl+J", command=self.export_json)
-        file_menu.add_command(label="Exportar TXT", accelerator="Ctrl+T", command=self.export_txt)
-        file_menu.add_command(label="Exportar CSV", accelerator="Ctrl+E", command=self.export_csv)
-        file_menu.add_command(label="Generar video", accelerator="Ctrl+M", command=self.generate_video)
+        file_menu.add_command(label=self.t("menu.items.export_json"), accelerator="Ctrl+J", command=self.export_json)
+        file_menu.add_command(label=self.t("menu.items.export_txt"), accelerator="Ctrl+T", command=self.export_txt)
+        file_menu.add_command(label=self.t("menu.items.export_csv"), accelerator="Ctrl+E", command=self.export_csv)
+        file_menu.add_command(label=self.t("menu.items.generate_video"), accelerator="Ctrl+M", command=self.generate_video)
         file_menu.add_separator()
-        file_menu.add_command(label="Abrir carpeta de salida", accelerator="Ctrl+O", command=self.open_output_folder)
-        file_menu.add_command(label="Salir", accelerator="Ctrl+Q", command=self._on_close)
-        menu_bar.add_cascade(label="Archivo", menu=file_menu)
+        file_menu.add_command(label=self.t("menu.items.open_output"), accelerator="Ctrl+O", command=self.open_output_folder)
+        file_menu.add_command(label=self.t("menu.items.exit"), accelerator="Ctrl+Q", command=self._on_close)
+        menu_bar.add_cascade(label=self.t("menu.file"), menu=file_menu)
 
         help_menu = tk.Menu(menu_bar, tearoff=0)
-        help_menu.add_command(label="About", accelerator="F1", command=self.show_about_dialog)
-        menu_bar.add_cascade(label="Vista", menu=self._build_view_menu(menu_bar))
-        menu_bar.add_cascade(label="Ayuda", menu=help_menu)
+        help_menu.add_command(label=self.t("menu.items.about"), accelerator="F1", command=self.show_about_dialog)
+        menu_bar.add_cascade(label=self.t("menu.view"), menu=self._build_view_menu(menu_bar))
+        menu_bar.add_cascade(label=self.t("menu.help"), menu=help_menu)
         self.config(menu=menu_bar)
 
     def _build_view_menu(self, menu_bar: tk.Menu) -> tk.Menu:
         view_menu = tk.Menu(menu_bar, tearoff=0)
-        view_menu.add_radiobutton(label="Tema oscuro", value="Oscuro", variable=self.appearance_mode_var, command=self._on_appearance_change)
-        view_menu.add_radiobutton(label="Tema claro", value="Claro", variable=self.appearance_mode_var, command=self._on_appearance_change)
-        view_menu.add_radiobutton(label="Tema del sistema", value="Sistema", variable=self.appearance_mode_var, command=self._on_appearance_change)
+        view_menu.add_radiobutton(label=self.t("appearance.dark"), value=self.t("appearance.dark"), variable=self.appearance_mode_var, command=self._on_appearance_change)
+        view_menu.add_radiobutton(label=self.t("appearance.light"), value=self.t("appearance.light"), variable=self.appearance_mode_var, command=self._on_appearance_change)
+        view_menu.add_radiobutton(label=self.t("appearance.system"), value=self.t("appearance.system"), variable=self.appearance_mode_var, command=self._on_appearance_change)
         view_menu.add_separator()
-        view_menu.add_command(label="Alternar oscuro/claro", accelerator="Ctrl+Shift+D", command=self.toggle_dark_mode)
+        language_menu = tk.Menu(view_menu, tearoff=0)
+        for code in SUPPORTED_UI_LANGUAGES:
+            label = ui_language_label(code)
+            language_menu.add_radiobutton(label=label, value=label, variable=self.ui_language_var, command=self._on_ui_language_change)
+        view_menu.add_cascade(label=self.t("labels.interface_language"), menu=language_menu)
+        view_menu.add_separator()
+        view_menu.add_command(label=self.t("menu.items.toggle_theme"), accelerator="Ctrl+Shift+D", command=self.toggle_dark_mode)
         return view_menu
 
     def _bind_shortcuts(self) -> None:
@@ -376,7 +609,7 @@ class VideoGeniusApp(ctk.CTk):
         self.status_label.grid(row=0, column=0, padx=16, pady=8, sticky="w")
         self.countdown_label = ctk.CTkLabel(
             self.status_bar,
-            text=f"{DISPLAY_VERSION} | Auto-close off",
+            text=self.t("countdown.off", version=DISPLAY_VERSION),
             text_color=ui_color("#93C5FD", "#67E8F9"),
             font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
         )
@@ -397,13 +630,13 @@ class VideoGeniusApp(ctk.CTk):
         ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 4))
         ctk.CTkLabel(
             hero,
-            text=f"{DISPLAY_VERSION}  |  LM Studio + local AI video desktop",
+            text=self.t("hero.subtitle", version=DISPLAY_VERSION),
             text_color=THEME["accent"],
             font=ctk.CTkFont("Segoe UI", 13),
         ).grid(row=1, column=0, sticky="w", padx=18, pady=(0, 4))
         ctk.CTkLabel(
             hero,
-            text="Turn an idea into script, prompts, local AI visuals, storyboard fallback, and MP4 output without blocking the UI.",
+            text=self.t("hero.description"),
             text_color=THEME["soft_text"],
             justify="left",
             wraplength=340,
@@ -411,7 +644,7 @@ class VideoGeniusApp(ctk.CTk):
         ).grid(row=2, column=0, sticky="w", padx=18, pady=(0, 16))
 
         row = 1
-        topic_card = self._make_card(self.sidebar, "Project brief", "Describe the idea the model should develop.")
+        topic_card = self._make_card(self.sidebar, self.t("cards.project_brief.title"), self.t("cards.project_brief.subtitle"))
         topic_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
         self.topic_text = ctk.CTkTextbox(
             topic_card,
@@ -426,11 +659,11 @@ class VideoGeniusApp(ctk.CTk):
         self.topic_text.bind("<KeyRelease>", lambda event: self._schedule_save())
         row += 1
 
-        setup_card = self._make_card(self.sidebar, "Instalacion guiada", "La app puede detectar, instalar y preconfigurar el entorno local para un usuario no tecnico.")
+        setup_card = self._make_card(self.sidebar, self.t("cards.setup.title"), self.t("cards.setup.subtitle"))
         setup_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
         self.setup_summary_label = ctk.CTkLabel(
             setup_card,
-            text="Analizando entorno...",
+            text=self.t("status.setup_summary_initial"),
             text_color=ui_color("#C7D2FE", "#C7D2FE"),
             justify="left",
             wraplength=330,
@@ -439,7 +672,7 @@ class VideoGeniusApp(ctk.CTk):
         self.setup_summary_label.grid(row=2, column=0, sticky="w", padx=14, pady=(4, 10))
         self.inspect_button = ctk.CTkButton(
             setup_card,
-            text="Analizar entorno (Ctrl+I)",
+            text=self.t("buttons.inspect_environment"),
             command=self.inspect_environment,
             fg_color=ui_color("#0369A1", "#0369A1"),
             hover_color=ui_color("#075985", "#075985"),
@@ -447,7 +680,7 @@ class VideoGeniusApp(ctk.CTk):
         self.inspect_button.grid(row=3, column=0, sticky="ew", padx=14, pady=(0, 8))
         self.prepare_button = ctk.CTkButton(
             setup_card,
-            text="Preparar entorno automatico",
+            text=self.t("buttons.prepare_environment"),
             command=self.prepare_environment,
             fg_color=ui_color("#15803D", "#15803D"),
             hover_color=ui_color("#166534", "#166534"),
@@ -455,7 +688,7 @@ class VideoGeniusApp(ctk.CTk):
         self.prepare_button.grid(row=4, column=0, sticky="ew", padx=14, pady=(0, 8))
         self.launch_lmstudio_button = ctk.CTkButton(
             setup_card,
-            text="Abrir LM Studio",
+            text=self.t("buttons.launch_lmstudio"),
             command=self.launch_lmstudio,
             fg_color=ui_color("#4F46E5", "#4F46E5"),
             hover_color=ui_color("#4338CA", "#4338CA"),
@@ -463,7 +696,7 @@ class VideoGeniusApp(ctk.CTk):
         self.launch_lmstudio_button.grid(row=5, column=0, sticky="ew", padx=14, pady=(0, 8))
         self.launch_comfyui_button = ctk.CTkButton(
             setup_card,
-            text="Abrir ComfyUI",
+            text=self.t("buttons.launch_comfyui"),
             command=self.launch_comfyui,
             fg_color=ui_color("#7C3AED", "#7C3AED"),
             hover_color=ui_color("#6D28D9", "#6D28D9"),
@@ -471,7 +704,7 @@ class VideoGeniusApp(ctk.CTk):
         self.launch_comfyui_button.grid(row=6, column=0, sticky="ew", padx=14, pady=(0, 10))
         self.install_model_button = ctk.CTkButton(
             setup_card,
-            text="Instalar modelo base recomendado",
+            text=self.t("buttons.install_checkpoint"),
             command=self.install_recommended_checkpoint,
             fg_color=ui_color("#B45309", "#B45309"),
             hover_color=ui_color("#92400E", "#92400E"),
@@ -479,7 +712,7 @@ class VideoGeniusApp(ctk.CTk):
         self.install_model_button.grid(row=7, column=0, sticky="ew", padx=14, pady=(0, 8))
         self.open_models_button = ctk.CTkButton(
             setup_card,
-            text="Abrir carpeta de modelos",
+            text=self.t("buttons.open_models_folder"),
             command=self.open_comfyui_models_folder,
             fg_color=ui_color("#1E293B", "#334155"),
             hover_color=ui_color("#0F172A", "#1E293B"),
@@ -487,17 +720,17 @@ class VideoGeniusApp(ctk.CTk):
         self.open_models_button.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 10))
         row += 1
 
-        profile_card = self._make_card(self.sidebar, "Quick setup", "Write the prompt, choose the style, and generate the full video from here.")
+        profile_card = self._make_card(self.sidebar, self.t("cards.quick_setup.title"), self.t("cards.quick_setup.subtitle"))
         profile_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
-        self._make_labeled_entry(profile_card, 2, "Visual style", self.visual_style_var)
-        self._make_labeled_combo(profile_card, 4, "Audience", self.audience_var, ["General", "Gamers", "Students", "Professionals", "Children"])
-        self._make_labeled_combo(profile_card, 6, "Narrative tone", self.tone_var, ["Cinematic and immersive", "Educational", "Epic", "Emotional", "Fast-paced"])
-        self._make_labeled_combo(profile_card, 8, "Video format", self.format_var, ["YouTube Short", "TikTok", "Instagram Reel", "YouTube Long", "Trailer"])
-        self._make_labeled_entry(profile_card, 10, "Estimated duration (s)", self.duration_var)
+        self._make_labeled_entry(profile_card, 2, self.t("labels.visual_style"), self.visual_style_var)
+        self._make_labeled_combo(profile_card, 4, self.t("labels.audience"), self.audience_var, ["General", "Gamers", "Students", "Professionals", "Children"])
+        self._make_labeled_combo(profile_card, 6, self.t("labels.narrative_tone"), self.tone_var, ["Cinematic and immersive", "Educational", "Epic", "Emotional", "Fast-paced"])
+        self._make_labeled_combo(profile_card, 8, self.t("labels.video_format"), self.format_var, ["YouTube Short", "TikTok", "Instagram Reel", "YouTube Long", "Trailer"])
+        self._make_labeled_entry(profile_card, 10, self.t("labels.duration"), self.duration_var)
         self.video_provider_combo = self._make_labeled_combo(
             profile_card,
             12,
-            "Render backend",
+            self.t("labels.render_backend"),
             self.video_provider_var,
             ["Storyboard local", "Local AI video", "Local Avatar video"],
         )
@@ -505,13 +738,13 @@ class VideoGeniusApp(ctk.CTk):
         self._make_labeled_combo(
             profile_card,
             14,
-            "Aspect ratio",
+            self.t("labels.aspect_ratio"),
             self.video_aspect_ratio_var,
             ["9:16", "16:9", "1:1"],
         )
         self.render_captions_checkbox = ctk.CTkCheckBox(
             profile_card,
-            text="Burn local captions on the final video",
+            text=self.t("checkbox.render_captions"),
             variable=self.render_captions_var,
             checkbox_width=20,
             checkbox_height=20,
@@ -520,7 +753,7 @@ class VideoGeniusApp(ctk.CTk):
         self.render_captions_checkbox.grid(row=16, column=0, sticky="w", padx=14, pady=(4, 8))
         self.quick_generate_button = ctk.CTkButton(
             profile_card,
-            text="Generar video completo (Ctrl+Shift+G)",
+            text=self.t("buttons.generate_full_video"),
             command=self.generate_full_video,
             height=44,
             fg_color=ui_color("#EA580C", "#EA580C"),
@@ -529,7 +762,7 @@ class VideoGeniusApp(ctk.CTk):
         self.quick_generate_button.grid(row=17, column=0, sticky="ew", padx=14, pady=(2, 12))
         ctk.CTkLabel(
             profile_card,
-            text="Usa los valores por defecto si no quieres tocar los ajustes tecnicos.",
+            text=self.t("quick_setup.tip"),
             text_color=ui_color("#94A3B8", "#94A3B8"),
             wraplength=330,
             justify="left",
@@ -537,14 +770,14 @@ class VideoGeniusApp(ctk.CTk):
         ).grid(row=18, column=0, sticky="w", padx=14, pady=(0, 10))
         row += 1
 
-        lm_card = self._make_card(self.sidebar, "LM Studio", "OpenAI-compatible local backend settings.")
+        lm_card = self._make_card(self.sidebar, self.t("cards.lmstudio.title"), self.t("cards.lmstudio.subtitle"))
         lm_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
-        self._make_labeled_entry(lm_card, 2, "Base URL", self.base_url_var)
-        self.model_combo = self._make_labeled_combo(lm_card, 4, "Model", self.model_var, [""])
+        self._make_labeled_entry(lm_card, 2, self.t("labels.base_url"), self.base_url_var)
+        self.model_combo = self._make_labeled_combo(lm_card, 4, self.t("labels.model"), self.model_var, [""])
 
         ctk.CTkLabel(
             lm_card,
-            text="LM Studio API key (optional)",
+            text=self.t("labels.api_key_optional"),
             text_color=THEME["card_label"],
             font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
         ).grid(row=6, column=0, sticky="w", padx=14, pady=(10, 4))
@@ -555,7 +788,7 @@ class VideoGeniusApp(ctk.CTk):
         self.api_key_entry.grid(row=0, column=0, sticky="ew")
         self.show_api_key_button = ctk.CTkButton(
             api_row,
-            text="Mostrar",
+            text=self.t("buttons.show"),
             width=90,
             command=self.toggle_api_key_visibility,
             fg_color=ui_color("#1D4ED8", "#2563EB"),
@@ -566,7 +799,7 @@ class VideoGeniusApp(ctk.CTk):
         slider_row = ctk.CTkFrame(lm_card, fg_color="transparent")
         slider_row.grid(row=8, column=0, padx=14, pady=(6, 2), sticky="ew")
         slider_row.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(slider_row, text="Temperature", text_color=THEME["card_label"], font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(slider_row, text=self.t("labels.temperature"), text_color=THEME["card_label"], font=ctk.CTkFont("Segoe UI", 13, weight="bold")).grid(row=0, column=0, sticky="w")
         self.temperature_value_label = ctk.CTkLabel(slider_row, text=f"{self.temperature_var.get():.2f}", text_color=THEME["accent"])
         self.temperature_value_label.grid(row=0, column=1, sticky="e")
         self.temperature_slider = ctk.CTkSlider(
@@ -581,110 +814,146 @@ class VideoGeniusApp(ctk.CTk):
         )
         self.temperature_slider.grid(row=9, column=0, padx=14, pady=(0, 10), sticky="ew")
 
-        self._make_labeled_entry(lm_card, 10, "Scene count", self.scene_count_var)
-        self._make_labeled_combo(lm_card, 12, "Output language", self.language_var, ["Espanol", "English", "Portugues", "Frances"])
+        self._make_labeled_entry(lm_card, 10, self.t("labels.scene_count"), self.scene_count_var)
+        self._make_labeled_combo(lm_card, 12, self.t("labels.output_language"), self.language_var, ["Espanol", "English", "Portugues", "Frances"])
         row += 1
 
-        self.local_ai_card = self._make_card(self.sidebar, "Local AI backend", "Use this area for AI-enhanced storyboard visuals, Local AI video clips, or Local Avatar video. Image workflows improve cinematic faceless videos; video workflows are required for full Local AI video.")
+        self.local_ai_card = self._make_card(self.sidebar, self.t("cards.local_ai.title"), self.t("cards.local_ai.subtitle"))
         self.local_ai_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
-        self._make_labeled_entry(self.local_ai_card, 2, "ComfyUI base URL", self.comfyui_base_url_var)
-        self._make_labeled_entry(self.local_ai_card, 4, "ComfyUI worker URLs", self.comfyui_worker_urls_var)
-        self._make_labeled_entry(self.local_ai_card, 6, "Parallel workers", self.parallel_scene_workers_var)
-        self.render_gpu_combo = self._make_labeled_combo(self.local_ai_card, 8, "GPU for Local AI render", self.render_gpu_var, ["Auto"])
-        self.comfyui_checkpoint_combo = self._make_labeled_combo(self.local_ai_card, 10, "Visual model", self.comfyui_checkpoint_var, [""])
-        self._make_labeled_entry(self.local_ai_card, 12, "Workflow JSON path", self.comfyui_workflow_path_var)
+        self._make_labeled_entry(self.local_ai_card, 2, self.t("labels.comfyui_base_url"), self.comfyui_base_url_var)
+        self._make_labeled_entry(self.local_ai_card, 4, self.t("labels.comfyui_workers"), self.comfyui_worker_urls_var)
+        self._make_labeled_entry(self.local_ai_card, 6, self.t("labels.parallel_workers"), self.parallel_scene_workers_var)
+        self.render_gpu_combo = self._make_labeled_combo(self.local_ai_card, 8, self.t("labels.comfyui_gpu"), self.render_gpu_var, ["Auto"])
+        self.comfyui_checkpoint_combo = self._make_labeled_combo(self.local_ai_card, 10, self.t("labels.visual_model"), self.comfyui_checkpoint_var, [""])
+        self._make_labeled_entry(self.local_ai_card, 12, self.t("labels.workflow_json"), self.comfyui_workflow_path_var)
         workflow_button = ctk.CTkButton(
             self.local_ai_card,
-            text="Browse or keep auto workflow",
+            text=self.t("buttons.browse_workflow"),
             command=self.choose_comfyui_workflow,
             fg_color=ui_color("#0F766E", "#0F766E"),
             hover_color=ui_color("#115E59", "#134E4A"),
         )
         workflow_button.grid(row=14, column=0, sticky="ew", padx=14, pady=(0, 10))
-        self._make_labeled_entry(self.local_ai_card, 16, "Negative prompt", self.comfyui_negative_prompt_var)
-        self._make_labeled_entry(self.local_ai_card, 18, "FFmpeg path", self.ffmpeg_path_var)
-        self._make_labeled_entry(self.local_ai_card, 20, "ComfyUI poll interval (s)", self.comfyui_poll_interval_var)
-        self._make_labeled_combo(self.local_ai_card, 22, "TTS backend", self.tts_backend_var, ["Windows local", "Sin voz", "Piper local"])
-        self.piper_executable_entry = self._make_labeled_entry(self.local_ai_card, 24, "Piper executable", self.piper_executable_path_var)
-        self.piper_model_entry = self._make_labeled_entry(self.local_ai_card, 26, "Piper model", self.piper_model_path_var)
-        self.piper_button = ctk.CTkButton(
+        self._make_labeled_entry(self.local_ai_card, 16, self.t("labels.negative_prompt"), self.comfyui_negative_prompt_var)
+        self._make_labeled_entry(self.local_ai_card, 18, self.t("labels.ffmpeg_path"), self.ffmpeg_path_var)
+        self.video_render_device_combo = self._make_labeled_combo(
             self.local_ai_card,
-            text="Browse Piper model",
-            command=self.choose_piper_model,
-            fg_color=ui_color("#2563EB", "#1D4ED8"),
-            hover_color=ui_color("#1E40AF", "#1E3A8A"),
+            20,
+            self.t("labels.video_render_device"),
+            self.video_render_device_var,
+            ["Auto", "CPU only"],
         )
-        self.piper_button.grid(row=28, column=0, sticky="ew", padx=14, pady=(0, 6))
-        self.avatar_source_image_entry = self._make_labeled_entry(self.local_ai_card, 30, "Avatar source image", self.avatar_source_image_path_var)
-        self.avatar_source_image_button = ctk.CTkButton(
+        self.video_encoder_combo = self._make_labeled_combo(
             self.local_ai_card,
-            text="Browse avatar image",
-            command=self.choose_avatar_image,
-            fg_color=ui_color("#9333EA", "#7E22CE"),
-            hover_color=ui_color("#7E22CE", "#6B21A8"),
+            22,
+            self.t("labels.video_encoder"),
+            self.video_encoder_var,
+            ["Auto", "libx264"],
         )
-        self.avatar_source_image_button.grid(row=32, column=0, sticky="ew", padx=14, pady=(0, 6))
-        ctk.CTkLabel(
+        self.detected_gpus_summary_label = ctk.CTkLabel(
             self.local_ai_card,
-            text="Consejo: usa 'Windows local' para voz sin instalar Piper. El workflow automatico de la app sirve para generar imagenes IA cinematicas dentro de 'Storyboard local'. Para 'Local AI video' selecciona un workflow de ComfyUI que produzca clips o gifs. Para 'Local Avatar video' usa un workflow de lipsync/avatar y una imagen base del avatar. Si eliges una GPU, la app intentara usarla cuando abra ComfyUI automaticamente.",
+            text=self.t("local_ai.no_gpu_detected"),
             text_color=ui_color("#94A3B8", "#94A3B8"),
             wraplength=330,
             justify="left",
             font=ctk.CTkFont("Segoe UI", 12),
-        ).grid(row=33, column=0, sticky="w", padx=14, pady=(0, 10))
+        )
+        self.detected_gpus_summary_label.grid(row=24, column=0, sticky="w", padx=14, pady=(2, 2))
+        self.active_encoder_summary_label = ctk.CTkLabel(
+            self.local_ai_card,
+            text=self.t("local_ai.active_encoder_pending"),
+            text_color=ui_color("#CBD5E1", "#CBD5E1"),
+            wraplength=330,
+            justify="left",
+            font=ctk.CTkFont("Segoe UI", 12, weight="bold"),
+        )
+        self.active_encoder_summary_label.grid(row=25, column=0, sticky="w", padx=14, pady=(0, 6))
+        self._tooltips.append(HoverToolTip(self.video_render_device_combo, lambda: self.t("tooltips.video_render_device")))
+        self._tooltips.append(HoverToolTip(self.video_encoder_combo, lambda: self.t("tooltips.video_encoder")))
+        self._make_labeled_entry(self.local_ai_card, 27, self.t("labels.comfyui_poll_interval"), self.comfyui_poll_interval_var)
+        self._make_labeled_combo(self.local_ai_card, 29, self.t("labels.tts_backend"), self.tts_backend_var, ["Windows local", "Sin voz", "Piper local"])
+        self.piper_executable_entry = self._make_labeled_entry(self.local_ai_card, 31, self.t("labels.piper_executable"), self.piper_executable_path_var)
+        self.piper_model_entry = self._make_labeled_entry(self.local_ai_card, 33, self.t("labels.piper_model"), self.piper_model_path_var)
+        self.piper_button = ctk.CTkButton(
+            self.local_ai_card,
+            text=self.t("buttons.browse_piper_model"),
+            command=self.choose_piper_model,
+            fg_color=ui_color("#2563EB", "#1D4ED8"),
+            hover_color=ui_color("#1E40AF", "#1E3A8A"),
+        )
+        self.piper_button.grid(row=35, column=0, sticky="ew", padx=14, pady=(0, 6))
+        self.avatar_source_image_entry = self._make_labeled_entry(self.local_ai_card, 37, self.t("labels.avatar_source_image"), self.avatar_source_image_path_var)
+        self.avatar_source_image_button = ctk.CTkButton(
+            self.local_ai_card,
+            text=self.t("buttons.browse_avatar_image"),
+            command=self.choose_avatar_image,
+            fg_color=ui_color("#9333EA", "#7E22CE"),
+            hover_color=ui_color("#7E22CE", "#6B21A8"),
+        )
+        self.avatar_source_image_button.grid(row=39, column=0, sticky="ew", padx=14, pady=(0, 6))
+        ctk.CTkLabel(
+            self.local_ai_card,
+            text=self.t("local_ai.tip"),
+            text_color=ui_color("#94A3B8", "#94A3B8"),
+            wraplength=330,
+            justify="left",
+            font=ctk.CTkFont("Segoe UI", 12),
+        ).grid(row=40, column=0, sticky="w", padx=14, pady=(0, 10))
         row += 1
 
-        advanced_card = self._make_card(self.sidebar, "Automation and advanced", "Saved in config.json next to the app.")
+        advanced_card = self._make_card(self.sidebar, self.t("cards.advanced.title"), self.t("cards.advanced.subtitle"))
         advanced_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
-        self.appearance_combo = self._make_labeled_combo(advanced_card, 2, "Tema", self.appearance_mode_var, ["Oscuro", "Claro", "Sistema"])
+        self.appearance_combo = self._make_labeled_combo(advanced_card, 2, self.t("labels.appearance_mode"), self.appearance_mode_var, list(self._appearance_choice_map().keys()))
         self.appearance_combo.configure(command=lambda _value: self._on_appearance_change())
-        self._make_labeled_entry(advanced_card, 4, "Output folder", self.output_dir_var)
+        self.ui_language_combo = self._make_labeled_combo(advanced_card, 4, self.t("labels.interface_language"), self.ui_language_var, self._ui_language_options())
+        self.ui_language_combo.configure(command=lambda _value: self._on_ui_language_change())
+        self._make_labeled_entry(advanced_card, 6, self.t("labels.output_folder"), self.output_dir_var)
         browse_button = ctk.CTkButton(
             advanced_card,
-            text="Browse",
+            text=self.t("buttons.browse"),
             command=self.choose_output_folder,
             fg_color=ui_color("#0F766E", "#0F766E"),
             hover_color=ui_color("#115E59", "#134E4A"),
         )
-        browse_button.grid(row=6, column=0, sticky="ew", padx=14, pady=(0, 10))
+        browse_button.grid(row=8, column=0, sticky="ew", padx=14, pady=(0, 10))
 
         self.auto_start_checkbox = ctk.CTkCheckBox(
             advanced_card,
-            text="Auto-start generation on launch",
+            text=self.t("checkbox.auto_start"),
             variable=self.auto_start_var,
             checkbox_width=20,
             checkbox_height=20,
             text_color=THEME["hero_text"],
         )
-        self.auto_start_checkbox.grid(row=7, column=0, sticky="w", padx=14, pady=(2, 6))
+        self.auto_start_checkbox.grid(row=9, column=0, sticky="w", padx=14, pady=(2, 6))
 
         self.auto_close_checkbox = ctk.CTkCheckBox(
             advanced_card,
-            text="Auto-close after inactivity",
+            text=self.t("checkbox.auto_close"),
             variable=self.auto_close_var,
             checkbox_width=20,
             checkbox_height=20,
             text_color=THEME["hero_text"],
         )
-        self.auto_close_checkbox.grid(row=8, column=0, sticky="w", padx=14, pady=(2, 6))
+        self.auto_close_checkbox.grid(row=10, column=0, sticky="w", padx=14, pady=(2, 6))
 
-        self._make_labeled_entry(advanced_card, 9, "Auto-close seconds", self.auto_close_seconds_var)
-        self._make_labeled_entry(advanced_card, 11, "JSON retry attempts", self.retries_var)
-        self._make_labeled_entry(advanced_card, 13, "Request timeout (s)", self.timeout_var)
-        self._make_labeled_entry(advanced_card, 15, "Max tokens", self.max_tokens_var)
+        self._make_labeled_entry(advanced_card, 11, self.t("labels.auto_close_seconds"), self.auto_close_seconds_var)
+        self._make_labeled_entry(advanced_card, 13, self.t("labels.json_retry_attempts"), self.retries_var)
+        self._make_labeled_entry(advanced_card, 15, self.t("labels.request_timeout"), self.timeout_var)
+        self._make_labeled_entry(advanced_card, 17, self.t("labels.max_tokens"), self.max_tokens_var)
         row += 1
 
-        actions_card = self._make_card(self.sidebar, "Actions", "Keyboard shortcuts are also available from the menu.")
+        actions_card = self._make_card(self.sidebar, self.t("cards.actions.title"), self.t("cards.actions.subtitle"))
         actions_card.grid(row=row, column=0, sticky="ew", padx=10, pady=(8, 18))
-        self.connection_button = self._make_action_button(actions_card, 2, "Probar conexion (Ctrl+L)", "#0284C7", "#0369A1", self.test_connection)
-        self.local_video_button = self._make_action_button(actions_card, 3, "Probar ComfyUI (Ctrl+H)", "#0F766E", "#115E59", self.test_local_video_connection)
-        self.generate_button = self._make_action_button(actions_card, 4, "Generar guion (Ctrl+G)", "#EA580C", "#C2410C", self.start_generation)
-        self.export_json_button = self._make_action_button(actions_card, 5, "Exportar JSON (Ctrl+J)", "#4F46E5", "#4338CA", self.export_json)
-        self.export_txt_button = self._make_action_button(actions_card, 6, "Exportar TXT (Ctrl+T)", "#2563EB", "#1D4ED8", self.export_txt)
-        self.export_csv_button = self._make_action_button(actions_card, 7, "Exportar CSV (Ctrl+E)", "#0F766E", "#115E59", self.export_csv)
-        self.video_button = self._make_action_button(actions_card, 8, "Generar video final (Ctrl+M)", "#B45309", "#92400E", self.generate_video)
-        self.folder_button = self._make_action_button(actions_card, 9, "Abrir carpeta (Ctrl+O)", "#334155", "#1E293B", self.open_output_folder)
-        self.exit_button = self._make_action_button(actions_card, 10, "Salir (Ctrl+Q)", "#7F1D1D", "#7C2D12", self._on_close)
+        self.connection_button = self._make_action_button(actions_card, 2, self.t("buttons.test_connection"), "#0284C7", "#0369A1", self.test_connection)
+        self.local_video_button = self._make_action_button(actions_card, 3, self.t("buttons.test_comfyui"), "#0F766E", "#115E59", self.test_local_video_connection)
+        self.generate_button = self._make_action_button(actions_card, 4, self.t("buttons.generate_script"), "#EA580C", "#C2410C", self.start_generation)
+        self.export_json_button = self._make_action_button(actions_card, 5, self.t("buttons.export_json"), "#4F46E5", "#4338CA", self.export_json)
+        self.export_txt_button = self._make_action_button(actions_card, 6, self.t("buttons.export_txt"), "#2563EB", "#1D4ED8", self.export_txt)
+        self.export_csv_button = self._make_action_button(actions_card, 7, self.t("buttons.export_csv"), "#0F766E", "#115E59", self.export_csv)
+        self.video_button = self._make_action_button(actions_card, 8, self.t("buttons.generate_video"), "#B45309", "#92400E", self.generate_video)
+        self.folder_button = self._make_action_button(actions_card, 9, self.t("buttons.folder"), "#334155", "#1E293B", self.open_output_folder)
+        self.exit_button = self._make_action_button(actions_card, 10, self.t("buttons.exit"), "#7F1D1D", "#7C2D12", self._on_close)
 
     def _build_main_panel(self) -> None:
         header = ctk.CTkFrame(self.main_panel, fg_color=THEME["surface"], corner_radius=24)
@@ -696,13 +965,13 @@ class VideoGeniusApp(ctk.CTk):
         left.grid(row=0, column=0, sticky="ew", padx=18, pady=18)
         ctk.CTkLabel(
             left,
-            text="Video workshop",
+            text=self.t("header.title"),
             text_color=THEME["primary_text"],
             font=ctk.CTkFont("Segoe UI Variable Display", 34, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkLabel(
             left,
-            text="Use Quick setup for one-click video creation, or keep the separate script and render steps when you need more control.",
+            text=self.t("header.subtitle"),
             wraplength=760,
             justify="left",
             text_color=THEME["muted_text"],
@@ -731,14 +1000,14 @@ class VideoGeniusApp(ctk.CTk):
         status_strip.grid_rowconfigure(1, weight=0)
         self.connection_chip = ctk.CTkLabel(
             status_strip,
-            text="LM Studio: not tested",
+            text=self.t("status.testing_connection"),
             text_color=ui_color("#BFDBFE", "#7DD3FC"),
             font=ctk.CTkFont("Segoe UI", 14, weight="bold"),
         )
         self.connection_chip.grid(row=0, column=0, sticky="w", padx=18, pady=12)
         self.render_chip = ctk.CTkLabel(
             status_strip,
-            text=f"Video backend: {self.video_provider_var.get()}",
+            text=self.t("status.render_chip", provider=self.video_provider_var.get()),
             text_color=ui_color("#A7F3D0", "#6EE7B7"),
             font=ctk.CTkFont("Segoe UI", 14, weight="bold"),
         )
@@ -756,7 +1025,7 @@ class VideoGeniusApp(ctk.CTk):
         self.progress_percent_label.grid(row=0, column=3, sticky="e", padx=(0, 18), pady=12)
         self.progress_detail_label = ctk.CTkLabel(
             status_strip,
-            text="Progreso del video: en espera",
+            text=self.t("progress.detail", detail=self.t("progress.waiting_detail")),
             text_color=ui_color("#94A3B8", "#CBD5E1"),
             font=ctk.CTkFont("Segoe UI", 12),
             anchor="w",
@@ -776,10 +1045,16 @@ class VideoGeniusApp(ctk.CTk):
         self.tab_view.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 18))
         self.main_panel.grid_rowconfigure(2, weight=1)
 
-        self.summary_tab = self.tab_view.add("Resumen")
-        self.scenes_tab = self.tab_view.add("Escenas")
-        self.json_tab = self.tab_view.add("JSON")
-        self.history_tab = self.tab_view.add("Historial")
+        self._tab_names = {
+            "summary": self.t("tabs.summary"),
+            "scenes": self.t("tabs.scenes"),
+            "json": self.t("tabs.json"),
+            "history": self.t("tabs.history"),
+        }
+        self.summary_tab = self.tab_view.add(self._tab_names["summary"])
+        self.scenes_tab = self.tab_view.add(self._tab_names["scenes"])
+        self.json_tab = self.tab_view.add(self._tab_names["json"])
+        self.history_tab = self.tab_view.add(self._tab_names["history"])
 
         self.summary_text = self._make_output_textbox(self.summary_tab)
         self.scenes_text = self._make_output_textbox(self.scenes_tab)
@@ -792,13 +1067,13 @@ class VideoGeniusApp(ctk.CTk):
         history_header.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(
             history_header,
-            text="Saved projects",
+            text=self.t("history.saved_projects"),
             text_color=THEME["primary_text"],
             font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
         ctk.CTkButton(
             history_header,
-            text="Refresh",
+            text=self.t("buttons.refresh"),
             command=self._load_history_buttons,
             fg_color=ui_color("#1D4ED8", "#2563EB"),
             hover_color=ui_color("#1E40AF", "#1D4ED8"),
@@ -879,7 +1154,7 @@ class VideoGeniusApp(ctk.CTk):
         tab.grid_rowconfigure(0, weight=1)
         textbox = ctk.CTkTextbox(tab, fg_color=THEME["surface_alt"], text_color=THEME["primary_text"], border_width=1, border_color=THEME["surface_border"])
         textbox.grid(row=0, column=0, sticky="nsew", padx=12, pady=12)
-        textbox.insert("1.0", "No project loaded yet.")
+        textbox.insert("1.0", self.t("output.placeholder"))
         textbox.configure(state="disabled")
         return textbox
 
@@ -891,7 +1166,7 @@ class VideoGeniusApp(ctk.CTk):
         mode = self._appearance_label_to_mode(self.appearance_mode_var.get())
         self._apply_user_appearance_mode(mode)
         self._schedule_save()
-        self._set_status(f"Tema actualizado: {self.appearance_mode_var.get()}")
+        self._set_status(self.t("status.theme_updated", theme=self.appearance_mode_var.get()))
 
     def toggle_dark_mode(self) -> None:
         current = self._appearance_label_to_mode(self.appearance_mode_var.get())
@@ -903,17 +1178,17 @@ class VideoGeniusApp(ctk.CTk):
         show = not self.show_api_key_var.get()
         self.show_api_key_var.set(show)
         self.api_key_entry.configure(show="" if show else "*")
-        self.show_api_key_button.configure(text="Ocultar" if show else "Mostrar")
+        self.show_api_key_button.configure(text=self.t("buttons.hide") if show else self.t("buttons.show"))
         self._reset_auto_close_timer()
 
     def _on_video_provider_change(self) -> None:
         self._sync_video_provider_ui()
         self._schedule_save()
-        self._set_status(f"Render backend updated: {self.video_provider_var.get()}")
+        self._set_status(self.t("status.provider_updated", provider=self.video_provider_var.get()))
 
     def _sync_video_provider_ui(self) -> None:
         provider = self.video_provider_var.get().strip() or "Storyboard local"
-        self.render_chip.configure(text=f"Video backend: {provider}")
+        self.render_chip.configure(text=self.t("status.render_chip", provider=provider))
         uses_comfyui_controls = provider in {"Storyboard local", "Local AI video", "Local Avatar video"}
         if hasattr(self, "local_ai_card"):
             if uses_comfyui_controls:
@@ -966,7 +1241,7 @@ class VideoGeniusApp(ctk.CTk):
 
     def _report_callback_exception(self, exc: type[BaseException], value: BaseException, traceback_obj: Any) -> None:
         self.logger.exception("Unhandled UI exception", exc_info=(exc, value, traceback_obj))
-        self._set_status(f"Unhandled error: {value}", error=True)
+        self._set_status(self.t("errors.unhandled", message=value), error=True)
 
     def _on_configure(self, event: tk.Event) -> None:
         if not self._closing and event.widget is self:
@@ -1008,6 +1283,8 @@ class VideoGeniusApp(ctk.CTk):
             "_auto_start_job_id",
             "_zoom_job_id",
             "_auto_close_trigger_job_id",
+            "_render_capabilities_job_id",
+            "_render_summary_job_id",
         ]:
             job_id = getattr(self, attribute)
             if job_id:
@@ -1022,6 +1299,7 @@ class VideoGeniusApp(ctk.CTk):
         appearance_mode = self._appearance_label_to_mode(self.appearance_mode_var.get())
         self._apply_user_appearance_mode(appearance_mode)
         self.config_manager.update(
+            ui_language=self._selected_ui_language_code(),
             appearance_mode=appearance_mode,
             lmstudio_base_url=self.base_url_var.get().strip(),
             model=self.model_var.get().strip(),
@@ -1033,6 +1311,8 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_worker_urls=self.comfyui_worker_urls_var.get().strip(),
             parallel_scene_workers=self._safe_positive_int(self.parallel_scene_workers_var.get(), 1),
             render_gpu_preference=self.render_gpu_var.get().strip() or "Auto",
+            video_render_device_preference=self.video_render_device_var.get().strip() or "Auto",
+            video_encoder_preference=self.video_encoder_var.get().strip() or "Auto",
             comfyui_checkpoint=self.comfyui_checkpoint_var.get().strip(),
             comfyui_workflow_path=self.comfyui_workflow_path_var.get().strip(),
             comfyui_negative_prompt=self.comfyui_negative_prompt_var.get().strip(),
@@ -1088,7 +1368,7 @@ class VideoGeniusApp(ctk.CTk):
     def _build_request(self) -> GenerationRequest:
         topic = self.topic_text.get("1.0", "end-1c").strip()
         if not topic:
-            raise ValueError("Enter a topic or idea before generating.")
+            raise ValueError(self.t("errors.enter_topic"))
         return GenerationRequest(
             topic=topic,
             visual_style=self.visual_style_var.get().strip() or "Cinematic",
@@ -1122,21 +1402,17 @@ class VideoGeniusApp(ctk.CTk):
         avatar_source_image_path = self.avatar_source_image_path_var.get().strip()
         if provider == "Local AI video":
             if workflow_mode == "missing":
-                raise ValueError(
-                    "Para 'Local AI video' debes seleccionar un workflow JSON de ComfyUI que produzca video o gif real por escena."
-                )
+                raise ValueError(self.t("errors.workflow_required"))
             if workflow_mode == "image":
-                raise ValueError(
-                    "El workflow seleccionado solo genera imagenes estaticas. Para 'Local AI video' usa un workflow de ComfyUI que produzca videos o gifs reales."
-                )
+                raise ValueError(self.t("errors.workflow_image_only"))
         if provider == "Local Avatar video":
             if not avatar_source_image_path:
-                raise ValueError("Local Avatar video necesita una imagen base del avatar.")
+                raise ValueError(self.t("errors.avatar_image_missing"))
             avatar_path = Path(avatar_source_image_path).expanduser()
             if not avatar_path.exists():
-                raise FileNotFoundError(f"Avatar source image not found: {avatar_path}")
+                raise FileNotFoundError(self.t("errors.avatar_image_not_found", path=avatar_path))
             if (self.tts_backend_var.get().strip() or "Windows local") == "Sin voz":
-                raise ValueError("Local Avatar video necesita audio para lipsync. Usa Windows local o Piper local.")
+                raise ValueError(self.t("errors.avatar_audio_required"))
         ffmpeg_path = self.ffmpeg_path_var.get().strip() or self.setup_manager.resolve_ffmpeg_path(self.ffmpeg_path_var.get())
         if ffmpeg_path and ffmpeg_path != self.ffmpeg_path_var.get().strip():
             self.ffmpeg_path_var.set(ffmpeg_path)
@@ -1150,6 +1426,8 @@ class VideoGeniusApp(ctk.CTk):
             "comfyui_worker_urls": self.comfyui_worker_urls_var.get().strip(),
             "parallel_scene_workers": self._safe_positive_int(self.parallel_scene_workers_var.get(), 1),
             "render_gpu_preference": self.render_gpu_var.get().strip() or "Auto",
+            "video_render_device_preference": self.video_render_device_var.get().strip() or "Auto",
+            "video_encoder_preference": self.video_encoder_var.get().strip() or "Auto",
             "comfyui_checkpoint": checkpoint,
             "comfyui_workflow_path": workflow_path,
             "comfyui_negative_prompt": self.comfyui_negative_prompt_var.get().strip(),
@@ -1174,6 +1452,8 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_worker_urls=options["comfyui_worker_urls"],
             parallel_scene_workers=options["parallel_scene_workers"],
             render_gpu_preference=options["render_gpu_preference"],
+            video_render_device_preference=options["video_render_device_preference"],
+            video_encoder_preference=options["video_encoder_preference"],
             comfyui_checkpoint=options["comfyui_checkpoint"],
             comfyui_workflow_path=options["comfyui_workflow_path"],
             comfyui_negative_prompt=options["comfyui_negative_prompt"],
@@ -1188,6 +1468,7 @@ class VideoGeniusApp(ctk.CTk):
     def _build_runtime_config_snapshot(self, render_settings: dict[str, Any]) -> AppConfig:
         return replace(
             self.app_config,
+            ui_language=self._selected_ui_language_code(),
             lmstudio_base_url=self.base_url_var.get().strip() or "http://127.0.0.1:1234",
             model=self.model_var.get().strip(),
             video_provider=render_settings["provider"],
@@ -1197,6 +1478,8 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_worker_urls=render_settings["comfyui_worker_urls"],
             parallel_scene_workers=self._safe_positive_int(str(render_settings["parallel_scene_workers"]), 1),
             render_gpu_preference=str(render_settings["render_gpu_preference"] or "Auto"),
+            video_render_device_preference=str(render_settings["video_render_device_preference"] or "Auto"),
+            video_encoder_preference=str(render_settings["video_encoder_preference"] or "Auto"),
             comfyui_checkpoint=render_settings["comfyui_checkpoint"],
             comfyui_workflow_path=render_settings["comfyui_workflow_path"],
             comfyui_negative_prompt=render_settings["comfyui_negative_prompt"],
@@ -1212,6 +1495,7 @@ class VideoGeniusApp(ctk.CTk):
     def _build_environment_config_snapshot(self) -> AppConfig:
         return replace(
             self.app_config,
+            ui_language=self._selected_ui_language_code(),
             appearance_mode=self._appearance_label_to_mode(self.appearance_mode_var.get()),
             lmstudio_base_url=self.base_url_var.get().strip() or "http://127.0.0.1:1234",
             model=self.model_var.get().strip(),
@@ -1222,6 +1506,8 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_worker_urls=self.comfyui_worker_urls_var.get().strip(),
             parallel_scene_workers=self._safe_positive_int(self.parallel_scene_workers_var.get(), 1),
             render_gpu_preference=self.render_gpu_var.get().strip() or "Auto",
+            video_render_device_preference=self.video_render_device_var.get().strip() or "Auto",
+            video_encoder_preference=self.video_encoder_var.get().strip() or "Auto",
             comfyui_checkpoint=self.comfyui_checkpoint_var.get().strip(),
             comfyui_workflow_path=self.comfyui_workflow_path_var.get().strip(),
             comfyui_negative_prompt=self.comfyui_negative_prompt_var.get().strip(),
@@ -1253,6 +1539,8 @@ class VideoGeniusApp(ctk.CTk):
             "comfyui_worker_urls": "comfyui_worker_urls",
             "parallel_scene_workers": "parallel_scene_workers",
             "render_gpu_preference": "render_gpu_preference",
+            "video_render_device_preference": "video_render_device_preference",
+            "video_encoder_preference": "video_encoder_preference",
             "comfyui_checkpoint": "comfyui_checkpoint",
             "comfyui_workflow_path": "comfyui_workflow_path",
             "comfyui_negative_prompt": "comfyui_negative_prompt",
@@ -1285,7 +1573,7 @@ class VideoGeniusApp(ctk.CTk):
         if not success:
             self.setup_manager.ensure_package_installed(LM_STUDIO_PACKAGE_ID, install_missing=True)
             if self.setup_manager.launch_application("lmstudio"):
-                self._queue_event("progress", value=0.06, message="Opening LM Studio automatically...")
+                self._queue_event("progress", value=0.06, message=self.t("progress.opening_lmstudio_auto"))
                 success, models, message = self.setup_manager.wait_for_lmstudio(base_url, timeout_seconds=90)
         if success:
             self._queue_event("connection", models=models, message=message)
@@ -1299,7 +1587,7 @@ class VideoGeniusApp(ctk.CTk):
             self._persist_runtime_updates(
                 render_settings,
                 {"ffmpeg_path": ffmpeg_path},
-                message="FFmpeg prepared automatically.",
+                message=self.t("status.ffmpeg_prepared"),
             )
 
         if render_settings["provider"] == "Storyboard local":
@@ -1338,7 +1626,7 @@ class VideoGeniusApp(ctk.CTk):
                     gpu_choice=str(render_settings["render_gpu_preference"] or "Auto"),
                     configured_url=str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
                 ):
-                    self._queue_event("progress", value=0.19, message="Opening ComfyUI automatically for storyboard visuals...")
+                    self._queue_event("progress", value=0.19, message=self.t("progress.opening_comfyui_storyboard"))
                 ready, resolved_url, detected_checkpoints, _message = self.setup_manager.wait_for_comfyui(
                     str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
                     timeout_seconds=120,
@@ -1369,9 +1657,9 @@ class VideoGeniusApp(ctk.CTk):
                 render_settings,
                 updates,
                 message=(
-                    "Environment prepared automatically for storyboard shorts."
+                    self.t("status.storyboard_environment_prepared")
                     if storyboard_ai_ready
-                    else "ComfyUI was not ready. Storyboard local will continue with local fallback visuals."
+                    else self.t("status.storyboard_local_fallback")
                 ),
                 checkpoints=checkpoints,
             )
@@ -1410,7 +1698,7 @@ class VideoGeniusApp(ctk.CTk):
                     gpu_choice=str(render_settings["render_gpu_preference"] or "Auto"),
                     configured_url=str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
                 ):
-                    self._queue_event("progress", value=0.18, message="Opening ComfyUI automatically for avatar render...")
+                    self._queue_event("progress", value=0.18, message=self.t("progress.opening_comfyui_avatar"))
                 ready, resolved_url, _checkpoints, _message = self.setup_manager.wait_for_comfyui(
                     str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
                     timeout_seconds=120,
@@ -1427,7 +1715,7 @@ class VideoGeniusApp(ctk.CTk):
                     updates["parallel_scene_workers"] = max(1, len(worker_urls))
             if not local_avatar_ready:
                 raise LocalAIVideoWorkflowError(
-                    "ComfyUI no estuvo listo para Local Avatar video. Abre ComfyUI, carga tu workflow de avatar/lipsync y vuelve a intentar."
+                    self.t("errors.avatar_comfyui_not_ready")
                 )
             avatar_nodes_ready, missing_avatar_nodes = self.setup_manager.comfyui_has_nodes(
                 str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
@@ -1435,13 +1723,12 @@ class VideoGeniusApp(ctk.CTk):
             )
             if not avatar_nodes_ready:
                 raise LocalAIVideoWorkflowError(
-                    "ComfyUI esta abierto, pero no cargo el stack de avatar requerido. "
-                    f"Faltan nodos: {', '.join(missing_avatar_nodes)}."
+                    self.t("errors.avatar_nodes_missing", nodes=", ".join(missing_avatar_nodes))
                 )
             self._persist_runtime_updates(
                 render_settings,
                 updates,
-                message="Environment prepared automatically for avatar video.",
+                message=self.t("status.avatar_environment_prepared"),
                 checkpoints=status.checkpoints,
             )
             return render_settings
@@ -1463,8 +1750,7 @@ class VideoGeniusApp(ctk.CTk):
         workflow_path = str(updates.get("comfyui_workflow_path") or render_settings["comfyui_workflow_path"]).strip()
         if workflow_path and self._describe_workflow_mode(workflow_path) == "image":
             raise LocalAIVideoWorkflowError(
-                "La configuracion automatica solo encontro un workflow estatico de imagen. "
-                "Para 'Local AI video' debes elegir un workflow de ComfyUI que produzca clips o gifs reales."
+                self.t("errors.image_workflow_only_auto")
             )
 
         checkpoints = list(prep_result.status.checkpoints)
@@ -1477,7 +1763,7 @@ class VideoGeniusApp(ctk.CTk):
                 gpu_choice=str(render_settings["render_gpu_preference"] or "Auto"),
                 configured_url=str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
             ):
-                self._queue_event("progress", value=0.19, message="Opening ComfyUI automatically...")
+                self._queue_event("progress", value=0.19, message=self.t("progress.opening_comfyui_auto"))
             ready, resolved_url, detected_checkpoints, _message = self.setup_manager.wait_for_comfyui(
                 str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
                 timeout_seconds=120,
@@ -1506,15 +1792,14 @@ class VideoGeniusApp(ctk.CTk):
         workflow_path = str(updates.get("comfyui_workflow_path") or render_settings["comfyui_workflow_path"]).strip()
         if workflow_path and self._describe_workflow_mode(workflow_path) == "image":
             raise LocalAIVideoWorkflowError(
-                "El workflow disponible solo genera imagenes estaticas. "
-                "Para 'Local AI video' debes usar un workflow de ComfyUI que produzca clips o gifs reales."
+                self.t("errors.image_workflow_only_selected")
             )
         if not local_ai_ready or not workflow_path:
             updates["video_provider"] = "Storyboard local"
             self._persist_runtime_updates(
                 render_settings,
                 updates,
-                message="ComfyUI was not ready. Falling back to Storyboard local automatically.",
+                message=self.t("status.storyboard_auto_fallback_selected"),
                 checkpoints=checkpoints,
             )
             return render_settings
@@ -1522,7 +1807,7 @@ class VideoGeniusApp(ctk.CTk):
         self._persist_runtime_updates(
             render_settings,
             updates,
-            message="Environment prepared automatically for full video generation.",
+            message=self.t("status.full_video_environment_prepared"),
             checkpoints=checkpoints,
         )
         return render_settings
@@ -1530,18 +1815,102 @@ class VideoGeniusApp(ctk.CTk):
     def _queue_event(self, event_type: str, **payload: Any) -> None:
         self.task_queue.put({"type": event_type, **payload})
 
-    def _apply_gpu_options(self, gpu_names: list[str]) -> None:
-        if not hasattr(self, "render_gpu_combo"):
+    def _populate_detected_gpu_options(self) -> None:
+        self._schedule_render_capability_refresh(immediate=True)
+
+    def _schedule_render_capability_refresh(self, *, immediate: bool = False) -> None:
+        if self._closing:
             return
-        options = self.setup_manager.format_gpu_options(gpu_names)
-        current = self.render_gpu_var.get().strip() or "Auto"
-        self.render_gpu_combo.configure(values=options)
-        if current not in options:
-            self.render_gpu_var.set("Auto")
+        if self._render_capabilities_job_id:
+            self.after_cancel(self._render_capabilities_job_id)
+        delay_ms = 0 if immediate else 220
+        self._render_capabilities_job_id = self.after(delay_ms, self._refresh_render_capabilities_async)
+
+    def _refresh_render_capabilities_async(self) -> None:
+        self._render_capabilities_job_id = None
+        ffmpeg_path = self.ffmpeg_path_var.get().strip()
+
+        def worker() -> None:
+            try:
+                detection = self.gpu_detector.detect(ffmpeg_path)
+            except Exception as exc:
+                self._queue_event("render_capabilities_error", message=str(exc))
+                return
+            self._queue_event("render_capabilities", detection=detection)
+
+        threading.Thread(target=worker, daemon=True, name="videogenius-render-capabilities").start()
+
+    def _apply_render_capabilities(self, detection: GPUDetectionResult) -> None:
+        self._last_gpu_detection = detection
+        self._apply_gpu_options(
+            [device.name for device in detection.devices],
+            list(detection.encoder_options),
+        )
+        self._update_render_selection_summary()
+
+    def _apply_gpu_options(self, gpu_names: list[str], encoder_options: list[str] | None = None) -> None:
+        if hasattr(self, "render_gpu_combo"):
+            local_ai_options = self.setup_manager.format_gpu_options(gpu_names)
+            current_local_ai = self.render_gpu_var.get().strip() or "Auto"
+            self.render_gpu_combo.configure(values=local_ai_options)
+            if current_local_ai not in local_ai_options:
+                self.render_gpu_var.set("Auto")
+        if hasattr(self, "video_render_device_combo"):
+            render_options = self.setup_manager.format_video_render_options(gpu_names)
+            current_render = self.video_render_device_var.get().strip() or "Auto"
+            self.video_render_device_combo.configure(values=render_options)
+            if current_render not in render_options:
+                self.video_render_device_var.set("Auto")
+        if hasattr(self, "video_encoder_combo"):
+            current_encoder = self.video_encoder_var.get().strip() or "Auto"
+            available_encoders = encoder_options or ["Auto", "libx264"]
+            self.video_encoder_combo.configure(values=available_encoders)
+            if current_encoder not in available_encoders:
+                self.video_encoder_var.set("Auto")
+
+    def _schedule_render_selection_summary_update(self) -> None:
+        if self._closing:
+            return
+        if self._render_summary_job_id:
+            self.after_cancel(self._render_summary_job_id)
+        self._render_summary_job_id = self.after(50, self._update_render_selection_summary)
+
+    def _format_detected_gpu_summary(self, detection: GPUDetectionResult | None) -> str:
+        if detection is None or not detection.devices:
+            return self.t("local_ai.no_gpu_detected")
+        labels = [f"GPU {device.index}: {device.name}" for device in detection.devices]
+        if len(labels) > 3:
+            labels = [*labels[:3], f"+{len(detection.devices) - 3}"]
+        return self.t("local_ai.detected_gpus", gpus=" | ".join(labels))
+
+    def _update_render_selection_summary(self) -> None:
+        self._render_summary_job_id = None
+        if hasattr(self, "detected_gpus_summary_label"):
+            self.detected_gpus_summary_label.configure(text=self._format_detected_gpu_summary(self._last_gpu_detection))
+        if not hasattr(self, "active_encoder_summary_label"):
+            return
+        if self._last_gpu_detection is None:
+            self.active_encoder_summary_label.configure(text=self.t("local_ai.active_encoder_pending"))
+            return
+        try:
+            selection = describe_render_selection(
+                self.video_render_device_var.get().strip() or "Auto",
+                list(self._last_gpu_detection.devices),
+                ffmpeg_path=self.ffmpeg_path_var.get().strip(),
+                available_encoders=set(self._last_gpu_detection.ffmpeg_encoders),
+                encoder_preference=self.video_encoder_var.get().strip() or "Auto",
+            )
+            plan = selection.selected_plan
+            self.active_encoder_summary_label.configure(
+                text=self.t("local_ai.active_encoder", encoder=plan.encoder_name, device=plan.label)
+            )
+        except Exception as exc:
+            self.logger.warning("Unable to summarize render selection: %s", exc)
+            self.active_encoder_summary_label.configure(text=self.t("local_ai.active_encoder_pending"))
 
     def _run_in_background(self, label: str, worker: Callable[[], None]) -> None:
         if self.is_busy:
-            self._set_status("A task is already running. Please wait.", error=True)
+            self._set_status(self.t("errors.task_running"), error=True)
             return
         self.is_busy = True
         self._toggle_busy_state(True)
@@ -1578,12 +1947,12 @@ class VideoGeniusApp(ctk.CTk):
                     self._set_progress_ui(value, message)
                     self._set_status(message)
                 elif event_type == "error":
-                    self._set_progress_ui(0, "Progreso del video: error")
+                    self._set_progress_ui(0, self.t("progress.error_detail"))
                     self._set_status(str(event.get("message", "Unknown error")), error=True)
                 elif event_type == "connection":
                     models = event.get("models", [])
                     message = str(event.get("message", ""))
-                    self.connection_chip.configure(text=f"LM Studio: {message}")
+                    self.connection_chip.configure(text=self.t("status.connection_chip", message=message))
                     if models:
                         self.model_combo.configure(values=models)
                         if not self.model_var.get().strip():
@@ -1596,10 +1965,13 @@ class VideoGeniusApp(ctk.CTk):
                         self.comfyui_checkpoint_combo.configure(values=checkpoints)
                         if not self.comfyui_checkpoint_var.get().strip():
                             self.comfyui_checkpoint_var.set(checkpoints[0])
-                    self.render_chip.configure(text=f"ComfyUI: {message}")
+                    self.render_chip.configure(text=self.t("status.local_connection_chip", message=message))
                     self._set_status(message)
                 elif event_type == "environment":
+                    status = event.get("status")
                     summary = str(event.get("summary", ""))
+                    if isinstance(status, SetupStatus):
+                        summary = self._format_setup_summary(status)
                     checkpoint_values = event.get("checkpoints", [])
                     updates = event.get("updates", {})
                     if isinstance(updates, dict):
@@ -1611,6 +1983,10 @@ class VideoGeniusApp(ctk.CTk):
                             self.parallel_scene_workers_var.set(str(updates.get("parallel_scene_workers") or "1"))
                         if "render_gpu_preference" in updates:
                             self.render_gpu_var.set(str(updates.get("render_gpu_preference") or "Auto"))
+                        if "video_render_device_preference" in updates:
+                            self.video_render_device_var.set(str(updates.get("video_render_device_preference") or "Auto"))
+                        if "video_encoder_preference" in updates:
+                            self.video_encoder_var.set(str(updates.get("video_encoder_preference") or "Auto"))
                         if "ffmpeg_path" in updates:
                             self.ffmpeg_path_var.set(str(updates.get("ffmpeg_path") or ""))
                         if "comfyui_checkpoint" in updates:
@@ -1630,30 +2006,51 @@ class VideoGeniusApp(ctk.CTk):
                     gpu_names = event.get("gpu_names", [])
                     if isinstance(gpu_names, list):
                         self._apply_gpu_options([str(item) for item in gpu_names if str(item).strip()])
+                    self._schedule_render_capability_refresh()
                     if summary and hasattr(self, "setup_summary_label"):
                         self.setup_summary_label.configure(text=summary)
                     self._sync_video_provider_ui()
-                    self._set_status(str(event.get("message", summary or "Environment updated.")), success=bool(event.get("success", False)))
+                    self._set_status(str(event.get("message", summary or self.t("status.environment_updated"))), success=bool(event.get("success", False)))
+                elif event_type == "render_capabilities":
+                    detection = event.get("detection")
+                    if isinstance(detection, GPUDetectionResult):
+                        self._apply_render_capabilities(detection)
+                elif event_type == "render_capabilities_error":
+                    self.logger.warning("Unable to refresh render capabilities: %s", event.get("message", "unknown error"))
+                    self._last_gpu_detection = None
+                    self._apply_gpu_options([])
+                    self._update_render_selection_summary()
                 elif event_type == "project":
                     self.current_project = event["project"]
                     self.current_history_path = event.get("history_path")
                     self._render_project(self.current_project)
                     self._load_history_buttons()
                     if bool(event.get("finished", True)):
-                        self._set_progress_ui(1, "Proyecto generado.")
-                        self._set_status("Project generated and saved to history.", success=True)
+                        self._set_progress_ui(1, self.t("status.progress_done"))
+                        self._set_status(self.t("status.project_generated_saved"), success=True)
                     else:
-                        self._set_status("Proyecto generado. Iniciando render del video...")
+                        self._set_status(self.t("status.project_generated_rendering"))
                 elif event_type == "video":
-                    self._set_progress_ui(1, "Video final completado.")
+                    self._set_progress_ui(1, self.t("progress.completed_detail"))
                     result = event["result"]
                     destination = result.file_path or result.remote_video_url or result.remote_video_id
                     workers_used = result.metadata.get("workers_used")
+                    encoder_used = result.metadata.get("video_encoder")
+                    render_devices_used = str(result.metadata.get("video_render_devices") or self.video_render_device_var.get() or "Auto")
+                    render_parts = [self.t("status.render_chip", provider=result.provider)]
+                    if encoder_used:
+                        render_parts.append(f"Encoder: {encoder_used}")
                     if workers_used:
-                        self.render_chip.configure(text=f"Video backend: {result.provider} | Workers: {workers_used}")
+                        render_parts.append(f"Workers: {workers_used}")
+                    self.render_chip.configure(text=" | ".join(render_parts))
+                    if hasattr(self, "active_encoder_summary_label") and encoder_used:
+                        self.active_encoder_summary_label.configure(
+                            text=self.t("local_ai.active_encoder", encoder=encoder_used, device=render_devices_used)
+                        )
+                    if encoder_used:
+                        self._set_status(self.t("status.video_completed_with_encoder", provider=result.provider, encoder=encoder_used, destination=destination), success=True)
                     else:
-                        self.render_chip.configure(text=f"Video backend: {result.provider}")
-                    self._set_status(f"Video generated with {result.provider}: {destination}", success=True)
+                        self._set_status(self.t("status.video_completed", provider=result.provider, destination=destination), success=True)
                 elif event_type == "done":
                     self.is_busy = False
                     self._toggle_busy_state(False)
@@ -1699,49 +2096,49 @@ class VideoGeniusApp(ctk.CTk):
         if hasattr(self, "progress_percent_label"):
             self.progress_percent_label.configure(text=f"{round(normalized * 100):d}%")
         if hasattr(self, "progress_detail_label") and detail:
-            self.progress_detail_label.configure(text=f"Progreso del video: {detail}")
+            self.progress_detail_label.configure(text=self.t("progress.detail", detail=detail))
 
     def _render_project(self, project: VideoProject) -> None:
         summary_lines = [
-            f"Title: {project.title}",
-            f"Summary: {project.summary}",
-            f"General script: {project.general_script}",
-            f"Structure: {project.structure}",
-            f"Language: {project.output_language}",
-            f"Mode: {project.generation_mode}",
-            f"Topic: {project.source_topic}",
-            f"Visual style: {project.visual_style}",
-            f"Audience: {project.audience}",
-            f"Narrative tone: {project.narrative_tone}",
-            f"Format: {project.video_format}",
-            f"Estimated duration: {project.estimated_total_duration_seconds}s",
+            f"{self.t('project.title')}: {project.title}",
+            f"{self.t('project.summary')}: {project.summary}",
+            f"{self.t('project.general_script')}: {project.general_script}",
+            f"{self.t('project.structure')}: {project.structure}",
+            f"{self.t('project.language')}: {project.output_language}",
+            f"{self.t('project.mode')}: {project.generation_mode}",
+            f"{self.t('project.topic')}: {project.source_topic}",
+            f"{self.t('project.visual_style')}: {project.visual_style}",
+            f"{self.t('project.audience')}: {project.audience}",
+            f"{self.t('project.narrative_tone')}: {project.narrative_tone}",
+            f"{self.t('project.format')}: {project.video_format}",
+            f"{self.t('project.estimated_duration')}: {project.estimated_total_duration_seconds}s",
         ]
         scene_blocks = []
         for scene in project.scenes:
             scene_blocks.append(
                 "\n".join(
                     [
-                        f"Scene {scene.scene_number}: {scene.scene_title}",
-                        f"Description: {scene.description}",
-                        f"Visual description: {scene.visual_description or '[not requested]'}",
-                        f"Visual prompt: {scene.visual_prompt or '[not requested]'}",
-                        f"Cinematic intent: {scene.cinematic_intent or '[auto]'}",
-                        f"Camera language: {scene.camera_language or '[auto]'}",
-                        f"Lighting style: {scene.lighting_style or '[auto]'}",
-                        f"Color palette: {scene.color_palette or '[auto]'}",
-                        f"Energy level: {scene.energy_level or '[auto]'}",
-                        f"Negative prompt: {scene.negative_prompt or '[default cinematic negative prompt]'}",
-                        f"Shots: {summarize_scene_shots(scene) or '[auto-generated]'}",
-                        f"Narration: {scene.narration}",
-                        f"Duration: {scene.duration_seconds}s",
-                        f"Transition: {scene.transition}",
+                        f"{self.t('project.scene')} {scene.scene_number}: {scene.scene_title}",
+                        f"{self.t('project.description')}: {scene.description}",
+                        f"{self.t('project.visual_description')}: {scene.visual_description or self.t('project.not_requested')}",
+                        f"{self.t('project.visual_prompt')}: {scene.visual_prompt or self.t('project.not_requested')}",
+                        f"{self.t('project.cinematic_intent')}: {scene.cinematic_intent or self.t('project.auto')}",
+                        f"{self.t('project.camera_language')}: {scene.camera_language or self.t('project.auto')}",
+                        f"{self.t('project.lighting_style')}: {scene.lighting_style or self.t('project.auto')}",
+                        f"{self.t('project.color_palette')}: {scene.color_palette or self.t('project.auto')}",
+                        f"{self.t('project.energy_level')}: {scene.energy_level or self.t('project.auto')}",
+                        f"{self.t('project.negative_prompt')}: {scene.negative_prompt or self.t('project.negative_prompt_default')}",
+                        f"{self.t('project.shots')}: {summarize_scene_shots(scene) or self.t('project.shots_auto')}",
+                        f"{self.t('project.narration')}: {scene.narration}",
+                        f"{self.t('project.duration')}: {scene.duration_seconds}s",
+                        f"{self.t('project.transition')}: {scene.transition}",
                     ]
                 )
             )
         self._write_textbox(self.summary_text, "\n".join(summary_lines))
         self._write_textbox(self.scenes_text, "\n\n".join(scene_blocks))
         self._write_textbox(self.json_text, json.dumps(project.to_dict(), indent=2, ensure_ascii=False))
-        self.tab_view.set("Resumen")
+        self.tab_view.set(self._tab_names["summary"])
 
     def _write_textbox(self, textbox: ctk.CTkTextbox, content: str) -> None:
         textbox.configure(state="normal")
@@ -1762,7 +2159,7 @@ class VideoGeniusApp(ctk.CTk):
                 raise requests.RequestException(message)
             self._queue_event("connection", models=models, message=message)
 
-        self._run_in_background("Testing LM Studio connection", worker)
+        self._run_in_background(self.t("tasks.test_lmstudio"), worker)
 
     def test_connection(self) -> None:
         self._load_models_background()
@@ -1783,7 +2180,7 @@ class VideoGeniusApp(ctk.CTk):
             details = f"{details} URL: {self.comfyui_base_url_var.get().strip() or 'http://127.0.0.1:8188'}"
             self._queue_event("local_video_connection", message=details, checkpoints=checkpoints)
 
-        self._run_in_background("Testing ComfyUI connection", worker)
+        self._run_in_background(self.t("tasks.test_comfyui"), worker)
 
     def inspect_environment(self) -> None:
         if self.is_busy:
@@ -1791,10 +2188,9 @@ class VideoGeniusApp(ctk.CTk):
 
         def worker() -> None:
             status = self.setup_manager.inspect_environment(self._build_environment_config_snapshot())
-            summary = "\n".join(status.summary_lines())
             self._queue_event(
                 "environment",
-                summary=summary,
+                status=status,
                 checkpoints=status.checkpoints,
                 updates={
                     "comfyui_base_url": status.comfyui_base_url,
@@ -1802,11 +2198,11 @@ class VideoGeniusApp(ctk.CTk):
                     "parallel_scene_workers": max(1, len(status.comfyui_worker_urls)),
                 },
                 gpu_names=status.gpu_names,
-                message="Environment analysis updated.",
+                message=self.t("status.environment_analysis_updated"),
                 success=status.ffmpeg_ready or status.comfyui_reachable or status.lmstudio_installed,
             )
 
-        self._run_in_background("Inspecting environment", worker)
+        self._run_in_background(self.t("tasks.inspect_environment"), worker)
 
     def prepare_environment(self) -> None:
         def worker() -> None:
@@ -1820,15 +2216,15 @@ class VideoGeniusApp(ctk.CTk):
             self.app_config = self.config_manager.config
             self._queue_event(
                 "environment",
-                summary="\n".join(result.status.summary_lines()),
+                status=result.status,
                 checkpoints=result.status.checkpoints,
                 updates=result.updates,
                 gpu_names=result.status.gpu_names,
-                message="Automatic setup completed.",
+                message=self.t("status.setup_completed"),
                 success=result.status.ffmpeg_ready or result.status.workflow_ready or bool(result.status.comfyui_checkpoint),
             )
 
-        self._run_in_background("Preparing environment automatically", worker)
+        self._run_in_background(self.t("tasks.prepare_environment"), worker)
 
     def install_recommended_checkpoint(self) -> None:
         def worker() -> None:
@@ -1862,15 +2258,15 @@ class VideoGeniusApp(ctk.CTk):
             status = self.setup_manager.inspect_environment(self._build_environment_config_snapshot())
             self._queue_event(
                 "environment",
-                summary="\n".join(status.summary_lines()),
+                status=status,
                 checkpoints=status.checkpoints,
                 updates=updates,
                 gpu_names=status.gpu_names,
-                message="Recommended checkpoint installed. Restart ComfyUI if it was already open.",
+                message=self.t("status.recommended_checkpoint_installed"),
                 success=True,
             )
 
-        self._run_in_background("Installing recommended ComfyUI checkpoint", worker)
+        self._run_in_background(self.t("tasks.install_checkpoint"), worker)
 
     def start_generation(self) -> None:
         try:
@@ -1882,13 +2278,13 @@ class VideoGeniusApp(ctk.CTk):
             return
 
         def worker() -> None:
-            self._queue_event("progress", value=0.05, message="Preparing generation request...")
+            self._queue_event("progress", value=0.05, message=self.t("progress.preparing_generation_request"))
             if not request.model:
                 models = client.list_models()
                 if not models:
-                    raise ValueError("No model was selected and LM Studio returned no models.")
+                    raise ValueError(self.t("errors.no_models_available"))
                 request.model = models[0]
-                self._queue_event("connection", models=models, message=f"Connected successfully. Using {models[0]}.")
+                self._queue_event("connection", models=models, message=self.t("status.connected_using_model", model=models[0]))
 
             project = self.generator_service.generate(
                 client=client,
@@ -1899,7 +2295,7 @@ class VideoGeniusApp(ctk.CTk):
             history_path = self.history_service.save(project)
             self._queue_event("project", project=project, history_path=history_path, finished=True)
 
-        self._run_in_background("Generating project", worker)
+        self._run_in_background(self.t("tasks.generate_project"), worker)
 
     def generate_full_video(self) -> None:
         try:
@@ -1915,7 +2311,7 @@ class VideoGeniusApp(ctk.CTk):
             return
 
         def worker() -> None:
-            self._queue_event("progress", value=0.03, message="Preparing full video generation...")
+            self._queue_event("progress", value=0.03, message=self.t("progress.preparing_full_video"))
             try:
                 render_settings_local = self._prepare_render_settings_for_full_video(dict(render_settings))
             except LocalAIVideoWorkflowError:
@@ -1929,9 +2325,9 @@ class VideoGeniusApp(ctk.CTk):
                     self._persist_runtime_updates(
                         render_settings_local,
                         {"ffmpeg_path": ffmpeg_path, "video_provider": "Storyboard local"},
-                        message="Automatic setup had issues. Continuing with Storyboard local.",
+                        message=self.t("progress.auto_setup_storyboard"),
                     )
-                self._queue_event("progress", value=0.2, message="Automatic setup had issues. Continuing with Storyboard local...")
+                self._queue_event("progress", value=0.2, message=self.t("progress.auto_setup_storyboard"))
 
             client, lmstudio_ready, models = self._ensure_lmstudio_ready_for_generation(request)
 
@@ -1954,14 +2350,14 @@ class VideoGeniusApp(ctk.CTk):
                     self._queue_event(
                         "progress",
                         value=0.24,
-                        message="LM Studio was not ready in time. Building the project locally...",
+                        message=self.t("progress.lmstudio_timeout_local"),
                     )
                     project = self.generator_service.generate_fallback_project(request)
             else:
                 self._queue_event(
                     "progress",
                     value=0.24,
-                    message="LM Studio is unavailable. Building the project locally...",
+                    message=self.t("progress.lmstudio_unavailable_local"),
                 )
                 project = self.generator_service.generate_fallback_project(request)
 
@@ -1987,7 +2383,7 @@ class VideoGeniusApp(ctk.CTk):
                 self._queue_event(
                     "progress",
                     value=0.62,
-                    message="Local AI render failed. Continuing with Storyboard local...",
+                    message=self.t("progress.local_ai_failed_storyboard"),
                 )
                 render_settings_local["provider"] = "Storyboard local"
                 ffmpeg_path = self.setup_manager.ensure_ffmpeg_ready(render_settings_local["ffmpeg_path"], install_missing=True)
@@ -1996,7 +2392,7 @@ class VideoGeniusApp(ctk.CTk):
                     self._persist_runtime_updates(
                         render_settings_local,
                         {"ffmpeg_path": ffmpeg_path, "video_provider": "Storyboard local"},
-                        message="Local AI render failed. Storyboard local was selected automatically.",
+                        message=self.t("progress.local_ai_failed_storyboard"),
                     )
                 fallback_request = self._build_video_render_request_for_project(project, render_settings_local)
                 result = self.video_render_service.render(
@@ -2009,28 +2405,28 @@ class VideoGeniusApp(ctk.CTk):
                 )
             self._queue_event("video", result=result)
 
-        self._run_in_background("Generating full video", worker)
+        self._run_in_background(self.t("tasks.generate_full_video"), worker)
 
     def export_json(self) -> None:
         if not self.current_project:
-            self._set_status("Nothing to export yet.", error=True)
+            self._set_status(self.t("status.nothing_to_export"), error=True)
             return
         file_path = self.export_service.export_json(self.current_project, self.config_manager.resolve_output_dir())
-        self._set_status(f"JSON exported: {file_path}", success=True)
+        self._set_status(self.t("status.json_exported", path=file_path), success=True)
 
     def export_txt(self) -> None:
         if not self.current_project:
-            self._set_status("Nothing to export yet.", error=True)
+            self._set_status(self.t("status.nothing_to_export"), error=True)
             return
         file_path = self.export_service.export_txt(self.current_project, self.config_manager.resolve_output_dir())
-        self._set_status(f"TXT exported: {file_path}", success=True)
+        self._set_status(self.t("status.txt_exported", path=file_path), success=True)
 
     def export_csv(self) -> None:
         if not self.current_project:
-            self._set_status("Nothing to export yet.", error=True)
+            self._set_status(self.t("status.nothing_to_export"), error=True)
             return
         file_path = self.export_service.export_csv(self.current_project, self.config_manager.resolve_output_dir())
-        self._set_status(f"CSV exported: {file_path}", success=True)
+        self._set_status(self.t("status.csv_exported", path=file_path), success=True)
 
     def generate_video(self) -> None:
         try:
@@ -2046,19 +2442,19 @@ class VideoGeniusApp(ctk.CTk):
             )
             self._queue_event("video", result=result)
 
-        self._run_in_background(f"Generating final video with {render_request.provider}", worker)
+        self._run_in_background(self.t("tasks.generate_final_video", provider=render_request.provider), worker)
 
     def open_output_folder(self) -> None:
         output_path = Path(self.config_manager.resolve_output_dir())
         output_path.mkdir(parents=True, exist_ok=True)
         os.startfile(output_path)  # type: ignore[attr-defined]
-        self._set_status(f"Opened output folder: {output_path}")
+        self._set_status(self.t("status.folder_opened", path=output_path))
 
     def launch_lmstudio(self) -> None:
         if self.setup_manager.launch_application("lmstudio"):
-            self._set_status("LM Studio opened.")
+            self._set_status(self.t("status.lmstudio_opened"))
             return
-        self._set_status("LM Studio was not found. Use 'Preparar entorno automatico' first.", error=True)
+        self._set_status(self.t("status.lmstudio_not_found"), error=True)
 
     def launch_comfyui(self) -> None:
         gpu_choice = self.render_gpu_var.get().strip() or "Auto"
@@ -2068,37 +2464,37 @@ class VideoGeniusApp(ctk.CTk):
             configured_url=self.comfyui_base_url_var.get().strip(),
         ):
             if gpu_choice == "Auto":
-                self._set_status("ComfyUI opened.")
+                self._set_status(self.t("status.comfyui_opened"))
             else:
-                self._set_status(f"ComfyUI opened with {gpu_choice}.")
+                self._set_status(self.t("status.comfyui_opened_with_gpu", gpu=gpu_choice))
             return
-        self._set_status("ComfyUI was not found. Use 'Preparar entorno automatico' first.", error=True)
+        self._set_status(self.t("status.comfyui_not_found"), error=True)
 
     def open_comfyui_models_folder(self) -> None:
         folder = self.setup_manager.open_models_folder()
-        self._set_status(f"Opened shared ComfyUI models folder: {folder}")
+        self._set_status(self.t("status.models_folder_opened", path=folder))
 
     def choose_output_folder(self) -> None:
         selected = filedialog.askdirectory(initialdir=self.config_manager.resolve_output_dir())
         if selected:
             self.output_dir_var.set(selected)
             self._save_gui_state()
-            self._set_status(f"Output folder updated: {selected}", success=True)
+            self._set_status(self.t("status.output_folder_updated", path=selected), success=True)
 
     def choose_avatar_image(self) -> None:
         selected = filedialog.askopenfilename(
-            title="Select avatar source image",
+            title=self.t("dialogs.avatar_image_title"),
             filetypes=[("Image files", "*.png *.jpg *.jpeg *.webp"), ("All files", "*.*")],
             initialdir=APP_ROOT,
         )
         if selected:
             self.avatar_source_image_path_var.set(selected)
             self._save_gui_state()
-            self._set_status(f"Avatar source image updated: {selected}", success=True)
+            self._set_status(self.t("status.avatar_image_updated", path=selected), success=True)
 
     def choose_comfyui_workflow(self) -> None:
         selected = filedialog.askopenfilename(
-            title="Select ComfyUI workflow JSON",
+            title=self.t("dialogs.workflow_title"),
             filetypes=[("JSON files", "*.json"), ("All files", "*.*")],
             initialdir=APP_ROOT,
         )
@@ -2107,28 +2503,22 @@ class VideoGeniusApp(ctk.CTk):
             self._save_gui_state()
             workflow_mode = self._describe_workflow_mode(selected)
             if workflow_mode == "video":
-                self._set_status(f"ComfyUI workflow updated: {selected}. Video output detected.", success=True)
+                self._set_status(self.t("status.workflow_updated", path=selected), success=True)
             elif workflow_mode == "image":
-                self._set_status(
-                    f"ComfyUI workflow updated: {selected}. Static image output detected; this is valid for AI-enhanced Storyboard local, but not for Local AI video or Local Avatar video.",
-                    success=True,
-                )
+                self._set_status(self.t("status.workflow_image_detected", path=selected), success=True)
             else:
-                self._set_status(
-                    f"ComfyUI workflow updated: {selected}. Output type could not be detected automatically.",
-                    success=True,
-                )
+                self._set_status(self.t("status.workflow_unknown_detected", path=selected), success=True)
 
     def choose_piper_model(self) -> None:
         selected = filedialog.askopenfilename(
-            title="Select Piper model",
+            title=self.t("dialogs.piper_model_title"),
             filetypes=[("ONNX files", "*.onnx"), ("All files", "*.*")],
             initialdir=APP_ROOT,
         )
         if selected:
             self.piper_model_path_var.set(selected)
             self._save_gui_state()
-            self._set_status(f"Piper model updated: {selected}", success=True)
+            self._set_status(self.t("status.model_updated", path=selected), success=True)
 
     def _load_history_buttons(self) -> None:
         for child in self.history_scroll.winfo_children():
@@ -2138,7 +2528,7 @@ class VideoGeniusApp(ctk.CTk):
         if not entries:
             ctk.CTkLabel(
                 self.history_scroll,
-                text="No saved projects yet.",
+                text=self.t("history.empty"),
                 text_color=THEME["muted_text"],
             ).grid(row=0, column=0, sticky="w", padx=12, pady=12)
             return
@@ -2159,7 +2549,7 @@ class VideoGeniusApp(ctk.CTk):
         try:
             project = self.history_service.load(entry.file_path)
         except Exception as exc:
-            self._set_status(f"Failed to load history entry: {exc}", error=True)
+            self._set_status(self.t("status.history_load_failed", error=exc), error=True)
             return
         self.current_project = project
         self.current_history_path = entry.file_path
@@ -2175,11 +2565,11 @@ class VideoGeniusApp(ctk.CTk):
         self.scene_count_var.set(str(len(project.scenes)))
         self._schedule_save()
         self._render_project(project)
-        self._set_status(f"Loaded history project: {entry.file_path.name}", success=True)
+        self._set_status(self.t("status.history_loaded", name=entry.file_path.name), success=True)
 
     def show_about_dialog(self) -> None:
         dialog = ctk.CTkToplevel(self)
-        dialog.title("About")
+        dialog.title(self.t("about.title"))
         dialog.geometry("500x190")
         dialog.resizable(False, False)
         dialog.configure(fg_color=THEME["status_bar"])
@@ -2187,7 +2577,7 @@ class VideoGeniusApp(ctk.CTk):
         dialog.grab_set()
 
         year = datetime.now().year
-        text = f"{DISPLAY_VERSION} creado por Synyster Rick, {year} Derechos Reservados"
+        text = self.t("about.copyright", version=DISPLAY_VERSION, year=year)
         ctk.CTkLabel(
             dialog,
             text=APP_NAME,
@@ -2204,7 +2594,7 @@ class VideoGeniusApp(ctk.CTk):
         ).pack(padx=18, pady=(0, 16))
         ctk.CTkButton(
             dialog,
-            text="Cerrar",
+            text=self.t("about.close"),
             command=dialog.destroy,
             fg_color=ui_color("#EA580C", "#EA580C"),
             hover_color=ui_color("#C2410C", "#C2410C"),
@@ -2222,7 +2612,7 @@ class VideoGeniusApp(ctk.CTk):
         self.scene_count_var.set("6")
         self.duration_var.set("60")
         self._schedule_save()
-        self._set_status("Project form reset.")
+        self._set_status(self.t("status.project_reset"))
 
     def _reset_auto_close_timer(self) -> None:
         self._auto_close_remaining = max(1, self._safe_positive_int(self.auto_close_seconds_var.get(), 60))
@@ -2230,12 +2620,12 @@ class VideoGeniusApp(ctk.CTk):
 
     def _update_countdown_label(self) -> None:
         if not self.auto_close_var.get():
-            self.countdown_label.configure(text=f"{DISPLAY_VERSION} | Auto-close off")
+            self.countdown_label.configure(text=self.t("countdown.off", version=DISPLAY_VERSION))
             return
         if self.is_busy:
-            self.countdown_label.configure(text=f"{DISPLAY_VERSION} | Auto-close paused while processing")
+            self.countdown_label.configure(text=self.t("countdown.paused", version=DISPLAY_VERSION))
             return
-        self.countdown_label.configure(text=f"{DISPLAY_VERSION} | Auto-close in {self._auto_close_remaining}s")
+        self.countdown_label.configure(text=self.t("countdown.in", version=DISPLAY_VERSION, seconds=self._auto_close_remaining))
 
     def _tick_auto_close(self) -> None:
         if self._closing or not self.winfo_exists():
@@ -2243,7 +2633,7 @@ class VideoGeniusApp(ctk.CTk):
         if self.auto_close_var.get() and not self.is_busy:
             self._auto_close_remaining -= 1
             if self._auto_close_remaining <= 0:
-                self._set_status("Auto-close timer reached zero. Closing application.")
+                self._set_status(self.t("status.auto_close_zero"))
                 self._auto_close_trigger_job_id = self.after(150, self._on_close)
                 return
         self._update_countdown_label()

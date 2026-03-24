@@ -4,6 +4,7 @@ import logging
 import tempfile
 import unittest
 import os
+import subprocess
 from pathlib import Path
 from unittest import mock
 
@@ -13,12 +14,25 @@ from videogenius_ai.comfyui_client import ComfyUIClient, _replace_placeholders, 
 from videogenius_ai.config import ConfigManager, sanitize_window_geometry
 from videogenius_ai.export_service import ExportService
 from videogenius_ai.generator_service import SceneGeneratorService
+from videogenius_ai.gpu_detector import GPUDetector
+from videogenius_ai.i18n import TranslationManager, normalize_ui_language
 from videogenius_ai.lmstudio_client import sort_models_for_generation
 from videogenius_ai.logging_utils import configure_logging
 from videogenius_ai.prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
+from videogenius_ai.render_devices import (
+    GPUDevice,
+    RENDER_DEVICE_ALL,
+    RENDER_DEVICE_CPU,
+    RENDER_DEVICE_NVIDIA,
+    VIDEO_ENCODER_NVENC_H264,
+    VideoEncoderPlan,
+    build_video_encoder_pool,
+    detect_gpu_devices,
+)
 from videogenius_ai.setup_manager import SetupManager
 from videogenius_ai.models import GenerationRequest, RenderedVideoResult, VideoProject
 from videogenius_ai.video_render_service import VideoRenderService
+from videogenius_ai.video_renderer import VideoRenderer
 from videogenius_ai.video_service import StoryboardVideoService
 from videogenius_ai.utils import parse_json_payload
 
@@ -43,6 +57,22 @@ I should think first.
 {"title":"Demo","scenes":[{"scene_number":1}]}"""
         payload = parse_json_payload(raw)
         self.assertEqual(payload["title"], "Demo")
+
+    def test_parse_json_repairs_unquoted_keys_and_trailing_commas(self) -> None:
+        raw = """{
+title: "Demo",
+scenes: [
+  {"scene_number": 1,},
+],
+}"""
+        payload = parse_json_payload(raw)
+        self.assertEqual(payload["title"], "Demo")
+        self.assertEqual(payload["scenes"][0]["scene_number"], 1)
+
+    def test_parse_json_repairs_control_characters_inside_strings(self) -> None:
+        raw = '{"title":"Demo","summary":"Linea 1\nLinea 2","scenes":[{"scene_number":1}]}'
+        payload = parse_json_payload(raw)
+        self.assertEqual(payload["summary"], "Linea 1\nLinea 2")
 
 
 class LMStudioModelSelectionTests(unittest.TestCase):
@@ -116,6 +146,48 @@ class GenerationNormalizationTests(unittest.TestCase):
         self.assertIn("Historia breve sobre robots", project.title)
         self.assertTrue(all(scene.shots for scene in project.scenes))
         self.assertTrue(all(scene.cinematic_intent for scene in project.scenes))
+
+    def test_generate_fallback_project_uses_brief_focus_instead_of_full_metaprompt(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic="5 videos de IA\nGenerate a unique YouTube Shorts video every time this prompt is run.\nUse different styles.",
+            visual_style="Cyberpunk",
+            audience="General",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=30,
+            scene_count=3,
+            generation_mode="Proyecto completo",
+            model="",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        project = service.generate_fallback_project(request)
+        self.assertTrue(project.title)
+        self.assertNotIn("Generate a unique YouTube Shorts video", project.title)
+        self.assertNotIn("every time this prompt is run", project.summary)
+
+    def test_generate_fallback_project_can_pick_theme_from_brief_options(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic="Generate a unique YouTube Shorts video.\n- Vary the theme randomly: nature, technology, travel.\n- Use a different visual style each time: anime, watercolor, claymation.",
+            visual_style="Cyberpunk",
+            audience="General",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=30,
+            scene_count=3,
+            generation_mode="Proyecto completo",
+            model="",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        with mock.patch.object(service, "_pick_brief_option", side_effect=["technology", "anime"]):
+            project = service.generate_fallback_project(request)
+        self.assertIn("technology", project.title.lower())
+        self.assertIn("anime", project.scenes[0].visual_prompt.lower())
 
     def test_normalize_project_preserves_shot_plan_and_direction_fields(self) -> None:
         service = SceneGeneratorService()
@@ -250,6 +322,7 @@ class ConfigTests(unittest.TestCase):
             config_path = Path(temp_dir) / "config.json"
             manager = ConfigManager(config_path=config_path)
             manager.update(
+                ui_language="en",
                 appearance_mode="dark",
                 output_dir=str(Path(temp_dir) / "output"),
                 video_provider="Local AI video",
@@ -258,10 +331,13 @@ class ConfigTests(unittest.TestCase):
                 comfyui_worker_urls="http://127.0.0.1:8188, http://127.0.0.1:8189",
                 parallel_scene_workers=2,
                 render_gpu_preference="GPU 1: NVIDIA RTX 4080",
+                video_render_device_preference=RENDER_DEVICE_ALL,
+                video_encoder_preference=VIDEO_ENCODER_NVENC_H264,
                 avatar_source_image_path=str(Path(temp_dir) / "avatar.png"),
             )
 
             reloaded = ConfigManager(config_path=config_path)
+            self.assertEqual(reloaded.config.ui_language, "en")
             self.assertEqual(reloaded.config.appearance_mode, "dark")
             self.assertEqual(reloaded.config.video_provider, "Local AI video")
             self.assertFalse(reloaded.config.render_captions)
@@ -269,12 +345,34 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(reloaded.config.comfyui_worker_urls, "http://127.0.0.1:8188, http://127.0.0.1:8189")
             self.assertEqual(reloaded.config.parallel_scene_workers, 2)
             self.assertEqual(reloaded.config.render_gpu_preference, "GPU 1: NVIDIA RTX 4080")
+            self.assertEqual(reloaded.config.video_render_device_preference, RENDER_DEVICE_ALL)
+            self.assertEqual(reloaded.config.video_encoder_preference, VIDEO_ENCODER_NVENC_H264)
             self.assertEqual(reloaded.config.avatar_source_image_path, str(Path(temp_dir) / "avatar.png"))
 
     def test_invalid_window_geometry_falls_back_to_default(self) -> None:
         self.assertEqual(sanitize_window_geometry("160x160+50+50"), "1460x900+80+40")
         self.assertEqual(sanitize_window_geometry("bad-value"), "1460x900+80+40")
         self.assertEqual(sanitize_window_geometry("1460x900+80+40"), "1460x900+80+40")
+
+
+class InternationalizationTests(unittest.TestCase):
+    def test_translation_manager_loads_expected_language(self) -> None:
+        translator = TranslationManager("en")
+        self.assertEqual(translator.translate("menu.file"), "File")
+        self.assertEqual(translator.translate("buttons.generate_full_video"), "Generate full video (Ctrl+Shift+G)")
+
+    def test_translation_manager_falls_back_and_formats_values(self) -> None:
+        translator = TranslationManager("es")
+        self.assertEqual(
+            translator.translate("status.video_completed", provider="Storyboard local", destination="D:/video.mp4"),
+            "Video generado con Storyboard local: D:/video.mp4",
+        )
+        self.assertEqual(translator.translate("missing.key"), "missing.key")
+
+    def test_normalize_ui_language_defaults_to_spanish(self) -> None:
+        self.assertEqual(normalize_ui_language("en-US"), "en")
+        self.assertEqual(normalize_ui_language(""), "es")
+        self.assertEqual(normalize_ui_language("fr"), "es")
 
 
 class SetupManagerGpuTests(unittest.TestCase):
@@ -286,9 +384,26 @@ class SetupManagerGpuTests(unittest.TestCase):
         self.assertEqual(manager.gpu_index_from_choice("GPU 1: NVIDIA RTX 4090"), 1)
         self.assertIsNone(manager.gpu_index_from_choice("Invalid"))
 
+    def test_format_video_render_options_include_cpu_and_multi_gpu_mode(self) -> None:
+        manager = SetupManager()
+        options = manager.format_video_render_options(["NVIDIA RTX 4080", "Intel Arc A770"])
+        self.assertEqual(
+            options,
+            [
+                "Auto",
+                "CPU only",
+                "NVIDIA (auto)",
+                "Intel (auto)",
+                "GPU 0: NVIDIA RTX 4080",
+                "GPU 1: Intel Arc A770",
+                "All GPUs (split scenes)",
+            ],
+        )
+
     def test_launch_application_sets_selected_gpu_environment_for_comfyui(self) -> None:
         manager = SetupManager()
         with (
+            mock.patch.object(manager, "launch_comfyui_api_server", return_value=False),
             mock.patch.object(manager, "find_application_path", return_value=r"C:\Apps\ComfyUI.exe"),
             mock.patch("videogenius_ai.setup_manager.subprocess.Popen") as popen_mock,
         ):
@@ -302,6 +417,113 @@ class SetupManagerGpuTests(unittest.TestCase):
         self.assertEqual(kwargs["env"]["CUDA_VISIBLE_DEVICES"], "1")
         self.assertEqual(kwargs["env"]["HIP_VISIBLE_DEVICES"], "1")
         self.assertEqual(kwargs["env"]["ROCR_VISIBLE_DEVICES"], "1")
+
+
+class RenderDeviceTests(unittest.TestCase):
+    def test_detect_gpu_devices_keeps_duplicate_model_names(self) -> None:
+        raw_payload = (
+            '[{"Name":"NVIDIA RTX 4090","AdapterCompatibility":"NVIDIA"},'
+            '{"Name":"NVIDIA RTX 4090","AdapterCompatibility":"NVIDIA"}]'
+        )
+        with mock.patch("videogenius_ai.render_devices._run", return_value=mock.Mock(stdout=raw_payload)):
+            devices = detect_gpu_devices()
+        self.assertEqual([device.index for device in devices], [0, 1])
+        self.assertEqual([device.name for device in devices], ["NVIDIA RTX 4090", "NVIDIA RTX 4090"])
+
+    def test_build_video_encoder_pool_resolves_multi_gpu_hardware_encoders(self) -> None:
+        devices = [
+            GPUDevice(index=0, name="NVIDIA RTX 4080", vendor="nvidia"),
+            GPUDevice(index=1, name="Intel Arc A770", vendor="intel"),
+        ]
+        pool = build_video_encoder_pool(
+            RENDER_DEVICE_ALL,
+            devices,
+            available_encoders={"h264_nvenc", "h264_qsv"},
+        )
+        self.assertEqual([plan.encoder_name for plan in pool], ["h264_nvenc", "h264_qsv"])
+        self.assertTrue(all(plan.hardware_accelerated for plan in pool))
+
+    def test_build_video_encoder_pool_honors_cpu_only_choice(self) -> None:
+        devices = [GPUDevice(index=0, name="NVIDIA RTX 4080", vendor="nvidia")]
+        pool = build_video_encoder_pool(
+            RENDER_DEVICE_CPU,
+            devices,
+            available_encoders={"h264_nvenc"},
+        )
+        self.assertEqual(len(pool), 1)
+        self.assertEqual(pool[0].encoder_name, "libx264")
+        self.assertFalse(pool[0].hardware_accelerated)
+
+    def test_build_video_encoder_pool_falls_back_to_cpu_for_unsupported_gpu(self) -> None:
+        devices = [GPUDevice(index=0, name="Unknown Accelerator", vendor="unknown")]
+        pool = build_video_encoder_pool(
+            "GPU 0: Unknown Accelerator",
+            devices,
+            available_encoders=set(),
+        )
+        self.assertEqual(pool[0].encoder_name, "libx264")
+        self.assertIn("CPU fallback", pool[0].label)
+
+    def test_build_video_encoder_pool_supports_vendor_auto_choice_and_encoder_override(self) -> None:
+        devices = [
+            GPUDevice(index=0, name="NVIDIA RTX 4080", vendor="nvidia"),
+            GPUDevice(index=1, name="Intel Arc A770", vendor="intel"),
+        ]
+        pool = build_video_encoder_pool(
+            RENDER_DEVICE_NVIDIA,
+            devices,
+            available_encoders={"h264_nvenc", "h264_qsv"},
+            encoder_preference=VIDEO_ENCODER_NVENC_H264,
+        )
+        self.assertEqual(len(pool), 1)
+        self.assertEqual(pool[0].encoder_name, "h264_nvenc")
+        self.assertEqual(pool[0].gpu_index, 0)
+
+
+class GPUDetectorTests(unittest.TestCase):
+    def test_detect_exposes_render_and_encoder_options(self) -> None:
+        devices = [GPUDevice(index=0, name="NVIDIA RTX 4080", vendor="nvidia")]
+        with (
+            mock.patch("videogenius_ai.gpu_detector.detect_gpu_devices", return_value=devices),
+            mock.patch("videogenius_ai.gpu_detector.detect_ffmpeg_video_encoders", return_value=("h264_nvenc", "libx264")),
+        ):
+            result = GPUDetector().detect("C:/ffmpeg.exe")
+        self.assertIn("NVIDIA (auto)", result.render_options)
+        self.assertIn("h264_nvenc", result.encoder_options)
+
+
+class VideoRendererTests(unittest.TestCase):
+    def test_run_with_fallback_retries_cpu_when_hardware_encoder_fails(self) -> None:
+        ffmpeg_wrapper = mock.Mock()
+        ffmpeg_wrapper.ffmpeg_path = "C:/ffmpeg.exe"
+        ffmpeg_wrapper.run.side_effect = [
+            subprocess.CalledProcessError(1, ["ffmpeg"], stderr=b"nvenc failed"),
+            mock.Mock(),
+        ]
+
+        with (
+            mock.patch("videogenius_ai.video_renderer.FFmpegWrapper", return_value=ffmpeg_wrapper),
+            mock.patch("videogenius_ai.video_renderer.GPUDetector"),
+        ):
+            renderer = VideoRenderer("C:/ffmpeg.exe")
+
+        gpu_plan = VideoEncoderPlan(
+            label="GPU 0: NVIDIA RTX 4080",
+            encoder_name="h264_nvenc",
+            ffmpeg_args=("-c:v", "h264_nvenc"),
+            vendor="nvidia",
+            gpu_index=0,
+            hardware_accelerated=True,
+        )
+
+        used_plan = renderer.run_with_fallback(
+            lambda plan: ["ffmpeg", "-c:v", plan.encoder_name],
+            gpu_plan,
+            stage_label="unit-test",
+        )
+
+        self.assertEqual(used_plan.encoder_name, "libx264")
+        self.assertEqual(ffmpeg_wrapper.run.call_count, 2)
 
 
 class LoggingTests(unittest.TestCase):

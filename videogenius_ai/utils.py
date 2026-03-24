@@ -68,12 +68,64 @@ def extract_json_candidate(text: str) -> str:
     return body[start:]
 
 
+def repair_json_candidate(text: str) -> str:
+    candidate = extract_json_candidate(text).replace("\r", "")
+    candidate = _escape_control_chars_in_strings(candidate)
+    candidate = re.sub(r"//.*?$", "", candidate, flags=re.MULTILINE)
+    candidate = re.sub(r"/\*.*?\*/", "", candidate, flags=re.DOTALL)
+    candidate = re.sub(r",(\s*[}\]])", r"\1", candidate)
+    candidate = re.sub(
+        r'([{,]\s*)([A-Za-z_][A-Za-z0-9_\- ]*)(\s*:)',
+        lambda match: f'{match.group(1)}"{match.group(2).strip()}"{match.group(3)}',
+        candidate,
+    )
+    return candidate
+
+
+def _escape_control_chars_in_strings(text: str) -> str:
+    escaped: list[str] = []
+    in_string = False
+    escaping = False
+    for character in text:
+        if in_string:
+            if escaping:
+                escaped.append(character)
+                escaping = False
+                continue
+            if character == "\\":
+                escaped.append(character)
+                escaping = True
+                continue
+            if character == '"':
+                escaped.append(character)
+                in_string = False
+                continue
+            if character == "\n":
+                escaped.append("\\n")
+                continue
+            if character == "\t":
+                escaped.append("\\t")
+                continue
+            if ord(character) < 32:
+                escaped.append(f"\\u{ord(character):04x}")
+                continue
+        else:
+            if character == '"':
+                in_string = True
+        escaped.append(character)
+    return "".join(escaped)
+
+
 def parse_json_payload(text: str) -> dict[str, Any]:
     candidate = extract_json_candidate(text)
     try:
         payload = json.loads(candidate)
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Unable to parse JSON response: {exc}") from exc
+        repaired_candidate = repair_json_candidate(text)
+        try:
+            payload = json.loads(repaired_candidate)
+        except json.JSONDecodeError:
+            raise ValueError(f"Unable to parse JSON response: {exc}") from exc
 
     if not isinstance(payload, dict):
         raise ValueError("The LM Studio response must be a JSON object.")

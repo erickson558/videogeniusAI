@@ -17,6 +17,7 @@ from .comfyui_client import ComfyUIClient
 from .config import AppConfig
 from .lmstudio_client import LMStudioClient
 from .paths import APP_ROOT, RUNTIME_DIR, WORKFLOWS_DIR
+from .render_devices import detect_gpu_names, format_local_ai_gpu_options, format_video_render_options, gpu_index_from_choice
 
 CREATE_NO_WINDOW = 0x08000000
 
@@ -274,19 +275,13 @@ class SetupManager:
         return ""
 
     def format_gpu_options(self, gpu_names: list[str]) -> list[str]:
-        return ["Auto", *[f"GPU {index}: {name}" for index, name in enumerate(gpu_names)]]
+        return format_local_ai_gpu_options(gpu_names)
+
+    def format_video_render_options(self, gpu_names: list[str]) -> list[str]:
+        return format_video_render_options(gpu_names)
 
     def gpu_index_from_choice(self, choice: str) -> int | None:
-        text = (choice or "").strip()
-        if not text or text.lower() == "auto":
-            return None
-        if not text.lower().startswith("gpu "):
-            return None
-        number_text = text[4:].split(":", 1)[0].strip()
-        try:
-            return int(number_text)
-        except ValueError:
-            return None
+        return gpu_index_from_choice(choice)
 
     def _comfyui_launch_env(self, gpu_choice: str) -> dict[str, str]:
         env = os.environ.copy()
@@ -484,44 +479,7 @@ class SetupManager:
         return ffmpeg_path if ffmpeg_path and ffprobe_path else ""
 
     def detect_gpu_names(self) -> list[str]:
-        names: list[str] = []
-        nvidia_smi = which("nvidia-smi") or which("nvidia-smi.exe")
-        if nvidia_smi:
-            try:
-                result = self._run(
-                    [
-                        nvidia_smi,
-                        "--query-gpu=name",
-                        "--format=csv,noheader",
-                    ]
-                )
-                names = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-                if names:
-                    return names
-            except Exception:
-                pass
-
-        if sys.platform.startswith("win"):
-            try:
-                result = self._run(
-                    [
-                        "powershell",
-                        "-NoProfile",
-                        "-NonInteractive",
-                        "-Command",
-                        "(Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name | ConvertTo-Json -Compress)",
-                    ]
-                )
-                raw = result.stdout.strip()
-                if raw:
-                    payload = json.loads(raw)
-                    if isinstance(payload, list):
-                        names = [str(item).strip() for item in payload if str(item).strip()]
-                    elif isinstance(payload, str) and payload.strip():
-                        names = [payload.strip()]
-            except Exception:
-                pass
-        return names
+        return detect_gpu_names()
 
     def _workflow_dimensions(self, aspect_ratio: str) -> tuple[int, int]:
         mapping = {
@@ -956,6 +914,8 @@ class SetupManager:
                 notes.append("Para render IA en varias GPU con ComfyUI, inicia una instancia por GPU en puertos distintos; la app repartira escenas entre todos los workers detectados.")
         elif gpu_names:
             notes.append("Se detecto una sola GPU activa para aceleracion local.")
+        if gpu_names:
+            notes.append(f"VideoGeniusAI detecto estas GPU: {', '.join(gpu_names)}.")
         if local_checkpoints:
             notes.append("Ya existe al menos un checkpoint en la carpeta compartida de VideoGeniusAI.")
         else:

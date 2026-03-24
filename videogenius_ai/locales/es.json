@@ -1,0 +1,301 @@
+{
+  "appearance": {
+    "dark": "Oscuro",
+    "light": "Claro",
+    "system": "Sistema"
+  },
+  "app": {
+    "ready": "Listo. Configura LM Studio y genera un proyecto."
+  },
+  "about": {
+    "title": "Acerca de",
+    "close": "Cerrar",
+    "copyright": "{version} creado por Synyster Rick, {year} Derechos Reservados"
+  },
+  "buttons": {
+    "browse": "Explorar",
+    "browse_avatar_image": "Explorar imagen del avatar",
+    "browse_piper_model": "Explorar modelo Piper",
+    "browse_workflow": "Explorar o mantener workflow automatico",
+    "exit": "Salir (Ctrl+Q)",
+    "export_csv": "Exportar CSV (Ctrl+E)",
+    "export_json": "Exportar JSON (Ctrl+J)",
+    "export_txt": "Exportar TXT (Ctrl+T)",
+    "folder": "Abrir carpeta (Ctrl+O)",
+    "generate_full_video": "Generar video completo (Ctrl+Shift+G)",
+    "generate_script": "Generar guion (Ctrl+G)",
+    "generate_video": "Generar video final (Ctrl+M)",
+    "hide": "Ocultar",
+    "inspect_environment": "Analizar entorno (Ctrl+I)",
+    "install_checkpoint": "Instalar modelo base recomendado",
+    "launch_comfyui": "Abrir ComfyUI",
+    "launch_lmstudio": "Abrir LM Studio",
+    "open_models_folder": "Abrir carpeta de modelos",
+    "prepare_environment": "Preparar entorno automatico",
+    "refresh": "Actualizar",
+    "show": "Mostrar",
+    "test_comfyui": "Probar ComfyUI (Ctrl+H)",
+    "test_connection": "Probar conexion (Ctrl+L)"
+  },
+  "cards": {
+    "actions": {
+      "subtitle": "Tambien hay atajos de teclado disponibles desde el menu.",
+      "title": "Acciones"
+    },
+    "advanced": {
+      "subtitle": "Se guarda en config.json junto a la app.",
+      "title": "Automatizacion y avanzado"
+    },
+    "lmstudio": {
+      "subtitle": "Configuracion del backend local compatible con OpenAI.",
+      "title": "LM Studio"
+    },
+    "local_ai": {
+      "subtitle": "Usa esta area para visuals IA en storyboard, clips de Local AI video o Local Avatar video. Los workflows de imagen mejoran los videos cinematicos sin rostro; los workflows de video son obligatorios para Local AI video.",
+      "title": "Backend IA local"
+    },
+    "project_brief": {
+      "subtitle": "Describe la idea que el modelo debe desarrollar.",
+      "title": "Brief del proyecto"
+    },
+    "quick_setup": {
+      "subtitle": "Escribe el prompt, elige el estilo y genera el video completo desde aqui.",
+      "title": "Configuracion rapida"
+    },
+    "setup": {
+      "subtitle": "La app puede detectar, instalar y preconfigurar el entorno local para un usuario no tecnico.",
+      "title": "Instalacion guiada"
+    }
+  },
+  "checkbox": {
+    "auto_close": "Cerrar automaticamente por inactividad",
+    "auto_start": "Iniciar generacion automaticamente al abrir",
+    "render_captions": "Quemar subtitulos locales en el video final"
+  },
+  "countdown": {
+    "in": "{version} | Cierre automatico en {seconds}s",
+    "off": "{version} | Cierre automatico desactivado",
+    "paused": "{version} | Cierre automatico pausado mientras procesa"
+  },
+  "dialogs": {
+    "avatar_image_title": "Selecciona la imagen base del avatar",
+    "piper_model_title": "Selecciona el modelo de Piper",
+    "workflow_title": "Selecciona el workflow JSON de ComfyUI"
+  },
+  "errors": {
+    "avatar_audio_required": "Local Avatar video necesita audio para lipsync. Usa Windows local o Piper local.",
+    "avatar_comfyui_not_ready": "ComfyUI no estuvo listo para Local Avatar video. Abre ComfyUI, carga tu workflow de avatar/lipsync y vuelve a intentar.",
+    "avatar_image_missing": "Local Avatar video necesita una imagen base del avatar.",
+    "avatar_image_not_found": "No se encontro la imagen base del avatar: {path}",
+    "avatar_nodes_missing": "ComfyUI esta abierto, pero no cargo el stack de avatar requerido. Faltan nodos: {nodes}.",
+    "enter_topic": "Escribe un tema o idea antes de generar.",
+    "generate_or_load_project": "Genera o carga un proyecto antes de crear el video final.",
+    "image_workflow_only_auto": "La configuracion automatica solo encontro un workflow estatico de imagen. Para 'Local AI video' debes elegir un workflow de ComfyUI que produzca clips o gifs reales.",
+    "image_workflow_only_selected": "El workflow disponible solo genera imagenes estaticas. Para 'Local AI video' debes usar un workflow de ComfyUI que produzca clips o gifs reales.",
+    "no_models_available": "No se selecciono ningun modelo y LM Studio no devolvio modelos disponibles.",
+    "task_running": "Ya hay una tarea en ejecucion. Espera a que termine.",
+    "unhandled": "Error no controlado: {message}",
+    "workflow_image_only": "El workflow seleccionado solo genera imagenes estaticas. Para 'Local AI video' usa un workflow de ComfyUI que produzca videos o gifs reales.",
+    "workflow_required": "Para 'Local AI video' debes seleccionar un workflow JSON de ComfyUI que produzca video o gif real por escena."
+  },
+  "header": {
+    "subtitle": "Usa Configuracion rapida para crear videos con un clic, o manten separados los pasos de guion y render cuando necesites mas control.",
+    "title": "Taller de video"
+  },
+  "hero": {
+    "description": "Convierte una idea en guion, prompts, visuals IA locales, fallback storyboard y salida MP4 sin congelar la interfaz.",
+    "subtitle": "{version}  |  LM Studio + video IA local de escritorio"
+  },
+  "history": {
+    "empty": "Todavia no hay proyectos guardados.",
+    "saved_projects": "Proyectos guardados"
+  },
+  "labels": {
+    "api_key_optional": "API key de LM Studio (opcional)",
+    "appearance_mode": "Tema",
+    "aspect_ratio": "Relacion de aspecto",
+    "audience": "Audiencia",
+    "auto_close_seconds": "Segundos para cierre automatico",
+    "avatar_source_image": "Imagen base del avatar",
+    "base_url": "Base URL",
+    "comfyui_base_url": "ComfyUI base URL",
+    "comfyui_gpu": "GPU para ComfyUI / Local AI",
+    "comfyui_poll_interval": "Intervalo de consulta a ComfyUI (s)",
+    "comfyui_workers": "URLs de workers de ComfyUI",
+    "duration": "Duracion estimada (s)",
+    "ffmpeg_path": "Ruta de FFmpeg",
+    "interface_language": "Idioma de interfaz",
+    "json_retry_attempts": "Intentos de reintento JSON",
+    "max_tokens": "Max tokens",
+    "model": "Modelo",
+    "negative_prompt": "Negative prompt",
+    "narrative_tone": "Tono narrativo",
+    "output_folder": "Carpeta de salida",
+    "output_language": "Idioma de salida",
+    "parallel_workers": "Workers en paralelo",
+    "piper_executable": "Ejecutable de Piper",
+    "piper_model": "Modelo de Piper",
+    "request_timeout": "Timeout de solicitud (s)",
+    "render_backend": "Backend de render",
+    "scene_count": "Numero de escenas",
+    "temperature": "Temperature",
+    "tts_backend": "Backend de TTS",
+    "video_encoder": "Encoder de video",
+    "video_format": "Formato de video",
+    "video_render_device": "Dispositivo de render de video",
+    "visual_model": "Modelo visual",
+    "visual_style": "Estilo visual",
+    "workflow_json": "Ruta del workflow JSON"
+  },
+  "local_ai": {
+    "tip": "Consejo: usa 'Windows local' para voz sin instalar Piper. El workflow automatico de la app sirve para generar imagenes IA cinematicas dentro de 'Storyboard local'. Para 'Local AI video' selecciona un workflow de ComfyUI que produzca clips o gifs. Para 'Local Avatar video' usa un workflow de lipsync/avatar y una imagen base del avatar. 'GPU para ComfyUI / Local AI' controla la GPU usada al abrir ComfyUI. 'Dispositivo de render de video' controla si FFmpeg finaliza el MP4 con CPU, una GPU o varias GPU.",
+    "detected_gpus": "GPU detectadas: {gpus}",
+    "no_gpu_detected": "GPU detectadas: ninguna. FFmpeg usara CPU si no hay aceleracion disponible.",
+    "active_encoder": "Encoder activo: {encoder} | Render: {device}",
+    "active_encoder_pending": "Encoder activo: detectando capacidades de render..."
+  },
+  "menu": {
+    "file": "Archivo",
+    "help": "Ayuda",
+    "view": "Vista",
+    "items": {
+      "about": "Acerca de",
+      "exit": "Salir",
+      "export_csv": "Exportar CSV",
+      "export_json": "Exportar JSON",
+      "export_txt": "Exportar TXT",
+      "generate_full_video": "Generar video completo",
+      "generate_script": "Generar guion",
+      "generate_video": "Generar video",
+      "inspect_environment": "Analizar entorno",
+      "new": "Nuevo",
+      "open_output": "Abrir carpeta de salida",
+      "prepare_environment": "Preparar entorno automatico",
+      "test_comfyui": "Probar ComfyUI",
+      "test_connection": "Probar conexion",
+      "toggle_theme": "Alternar oscuro/claro"
+    }
+  },
+  "output": {
+    "placeholder": "Todavia no hay ningun proyecto cargado."
+  },
+  "progress": {
+    "completed_detail": "video final completado",
+    "detail": "Progreso del video: {detail}",
+    "error_detail": "error",
+    "auto_setup_storyboard": "La preparacion automatica tuvo problemas. Continuando con Storyboard local...",
+    "lmstudio_timeout_local": "LM Studio no estuvo listo a tiempo. Construyendo el proyecto localmente...",
+    "lmstudio_unavailable_local": "LM Studio no esta disponible. Construyendo el proyecto localmente...",
+    "local_ai_failed_storyboard": "Fallo el render con Local AI. Continuando con Storyboard local...",
+    "opening_comfyui_auto": "Abriendo ComfyUI automaticamente...",
+    "opening_comfyui_avatar": "Abriendo ComfyUI automaticamente para render de avatar...",
+    "opening_comfyui_storyboard": "Abriendo ComfyUI automaticamente para visuals de storyboard...",
+    "opening_lmstudio_auto": "Abriendo LM Studio automaticamente...",
+    "preparing_full_video": "Preparando generacion de video completo...",
+    "preparing_generation_request": "Preparando solicitud de generacion...",
+    "waiting_detail": "en espera"
+  },
+  "project": {
+    "audience": "Audiencia",
+    "auto": "[auto]",
+    "description": "Descripcion",
+    "duration": "Duracion",
+    "energy_level": "Nivel de energia",
+    "estimated_duration": "Duracion estimada",
+    "format": "Formato",
+    "general_script": "Guion general",
+    "language": "Idioma",
+    "lighting_style": "Estilo de iluminacion",
+    "mode": "Modo",
+    "narration": "Narracion",
+    "narrative_tone": "Tono narrativo",
+    "negative_prompt": "Negative prompt",
+    "negative_prompt_default": "[negative prompt cinematografico por defecto]",
+    "not_requested": "[no solicitado]",
+    "scene": "Escena",
+    "shots": "Planos",
+    "shots_auto": "[autogenerados]",
+    "structure": "Estructura",
+    "summary": "Resumen",
+    "title": "Titulo",
+    "topic": "Tema",
+    "transition": "Transicion",
+    "visual_description": "Descripcion visual",
+    "visual_prompt": "Visual prompt",
+    "visual_style": "Estilo visual",
+    "camera_language": "Lenguaje de camara",
+    "cinematic_intent": "Intencion cinematografica",
+    "color_palette": "Paleta de color"
+  },
+  "quick_setup": {
+    "tip": "Usa los valores por defecto si no quieres tocar los ajustes tecnicos."
+  },
+  "status": {
+    "auto_close_zero": "El temporizador de cierre automatico llego a cero. Cerrando aplicacion.",
+    "comfyui_not_found": "No se encontro ComfyUI. Usa 'Preparar entorno automatico' primero.",
+    "comfyui_opened": "ComfyUI abierto.",
+    "comfyui_opened_with_gpu": "ComfyUI abierto con {gpu}.",
+    "connected_using_model": "Conexion correcta. Usando {model}.",
+    "connection_chip": "LM Studio: {message}",
+    "csv_exported": "CSV exportado: {path}",
+    "environment_analysis_updated": "Analisis del entorno actualizado.",
+    "environment_updated": "Entorno actualizado.",
+    "ffmpeg_prepared": "FFmpeg preparado automaticamente.",
+    "folder_opened": "Carpeta de salida abierta: {path}",
+    "history_load_failed": "No se pudo cargar el historial: {error}",
+    "history_loaded": "Proyecto del historial cargado: {name}",
+    "interface_language_updated": "Idioma de interfaz actualizado: {language}",
+    "json_exported": "JSON exportado: {path}",
+    "lmstudio_not_found": "No se encontro LM Studio. Usa 'Preparar entorno automatico' primero.",
+    "lmstudio_opened": "LM Studio abierto.",
+    "model_updated": "Modelo de Piper actualizado: {path}",
+    "models_folder_opened": "Carpeta compartida de modelos de ComfyUI abierta: {path}",
+    "nothing_to_export": "Todavia no hay nada para exportar.",
+    "output_folder_updated": "Carpeta de salida actualizada: {path}",
+    "project_generated_rendering": "Proyecto generado. Iniciando render del video...",
+    "project_generated_saved": "Proyecto generado y guardado en el historial.",
+    "project_reset": "Formulario del proyecto reiniciado.",
+    "provider_updated": "Backend de render actualizado: {provider}",
+    "recommended_checkpoint_installed": "Checkpoint recomendado instalado. Reinicia ComfyUI si ya estaba abierto.",
+    "render_chip": "Backend de video: {provider}",
+    "storyboard_auto_fallback_selected": "ComfyUI no estuvo listo. Se selecciono Storyboard local automaticamente.",
+    "storyboard_environment_prepared": "Entorno preparado automaticamente para shorts storyboard.",
+    "storyboard_local_fallback": "ComfyUI no estuvo listo. Storyboard local continuara con visuals de fallback local.",
+    "setup_completed": "Preparacion automatica completada.",
+    "setup_summary_initial": "Analizando entorno...",
+    "testing_connection": "LM Studio: sin probar",
+    "theme_updated": "Tema actualizado: {theme}",
+    "txt_exported": "TXT exportado: {path}",
+    "avatar_environment_prepared": "Entorno preparado automaticamente para video de avatar.",
+    "full_video_environment_prepared": "Entorno preparado automaticamente para generacion de video completo.",
+    "video_completed": "Video generado con {provider}: {destination}",
+    "video_completed_with_encoder": "Video generado con {provider} con {encoder}: {destination}",
+    "workflow_image_detected": "Workflow de ComfyUI actualizado: {path}. Se detecto salida de imagen estatica; sirve para Storyboard local con IA, pero no para Local AI video ni Local Avatar video.",
+    "workflow_unknown_detected": "Workflow de ComfyUI actualizado: {path}. No se pudo detectar automaticamente el tipo de salida.",
+    "workflow_updated": "Workflow de ComfyUI actualizado: {path}. Se detecto salida de video.",
+    "avatar_image_updated": "Imagen base del avatar actualizada: {path}",
+    "progress_done": "Proyecto generado.",
+    "progress_error": "error",
+    "local_connection_chip": "ComfyUI: {message}"
+  },
+  "tabs": {
+    "history": "Historial",
+    "json": "JSON",
+    "scenes": "Escenas",
+    "summary": "Resumen"
+  },
+  "tasks": {
+    "generate_final_video": "Generando video final con {provider}",
+    "generate_full_video": "Generando video completo",
+    "generate_project": "Generando proyecto",
+    "inspect_environment": "Analizando entorno",
+    "install_checkpoint": "Instalando checkpoint recomendado de ComfyUI",
+    "prepare_environment": "Preparando entorno automaticamente",
+    "test_comfyui": "Probando conexion con ComfyUI",
+    "test_lmstudio": "Probando conexion con LM Studio"
+  },
+  "tooltips": {
+    "video_encoder": "Auto elige el mejor encoder disponible en FFmpeg. Los encoders de GPU requieren soporte real en FFmpeg y drivers compatibles. Si fallan, la app vuelve automaticamente a CPU.",
+    "video_render_device": "Auto intenta usar la mejor GPU disponible. CPU es la opcion mas estable pero mas lenta. Tambien puedes forzar un fabricante o una GPU concreta cuando existan varias."
+  }
+}

@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.1.1 - 2026-03-24
+
+- Added GPU-aware FFmpeg render selection with automatic CPU fallback on hardware encode failure.
+- Surfaced detected GPUs and active encoder in the desktop UI with persisted render preferences.
+- Stabilized storyboard and Local AI video rendering behind shared renderer abstractions and regression tests.
+
 ## V0.1.0 - 2026-03-21
 
 - Added cinematic shot planning and richer AI scene direction for faceless video generation.

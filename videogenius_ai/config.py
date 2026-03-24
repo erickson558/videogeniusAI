@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from .i18n import DEFAULT_UI_LANGUAGE, normalize_ui_language
 from .paths import CONFIG_PATH, HISTORY_DIR, OUTPUT_DIR, RUNTIME_DIR, TEMP_DIR, WORKFLOWS_DIR
 from .version import DISPLAY_VERSION
 
@@ -35,6 +36,7 @@ def sanitize_window_geometry(value: str, fallback: str = DEFAULT_WINDOW_GEOMETRY
 @dataclass
 class AppConfig:
     app_version: str = DISPLAY_VERSION
+    ui_language: str = DEFAULT_UI_LANGUAGE
     appearance_mode: str = "dark"
     lmstudio_base_url: str = "http://127.0.0.1:1234"
     model: str = ""
@@ -46,6 +48,8 @@ class AppConfig:
     comfyui_worker_urls: str = ""
     parallel_scene_workers: int = 1
     render_gpu_preference: str = "Auto"
+    video_render_device_preference: str = "Auto"
+    video_encoder_preference: str = "Auto"
     comfyui_checkpoint: str = ""
     comfyui_workflow_path: str = ""
     comfyui_negative_prompt: str = ""
@@ -110,6 +114,7 @@ class ConfigManager:
         payload = asdict(AppConfig())
         payload.update(raw if isinstance(raw, dict) else {})
         payload["app_version"] = DISPLAY_VERSION
+        payload["ui_language"] = normalize_ui_language(str(payload.get("ui_language", DEFAULT_UI_LANGUAGE)))
         payload["window_geometry"] = sanitize_window_geometry(str(payload.get("window_geometry", DEFAULT_WINDOW_GEOMETRY)))
         return AppConfig(**payload)
 

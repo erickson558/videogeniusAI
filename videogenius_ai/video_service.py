@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import math
 import subprocess
 import textwrap
 from pathlib import Path
-from shutil import which
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -12,8 +12,10 @@ from .comfyui_client import ComfyUIClient, detect_workflow_output_mode
 from .logging_utils import configure_logging
 from .models import RenderedVideoResult, SceneShot, VideoProject, VideoRenderRequest
 from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt, summarize_scene_shots
+from .render_devices import VideoEncoderPlan
 from .tts_service import PiperTTSService, WindowsTTSService
 from .utils import now_stamp, sanitize_filename
+from .video_renderer import VideoRenderer
 
 CREATE_NO_WINDOW = 0x08000000
 SHORTS_FPS = 25
@@ -49,47 +51,24 @@ class StoryboardVideoService:
     def _dimensions_for_ratio(self, aspect_ratio: str) -> tuple[int, int]:
         return ASPECT_RATIO_DIMENSIONS.get(aspect_ratio, ASPECT_RATIO_DIMENSIONS["9:16"])
 
-    def _resolve_ffmpeg_paths(self, ffmpeg_path: str) -> tuple[str, str]:
-        resolved_ffmpeg = ffmpeg_path.strip() if ffmpeg_path.strip() and Path(ffmpeg_path).exists() else (which("ffmpeg") or which("ffmpeg.exe"))
-        if not resolved_ffmpeg:
-            raise FileNotFoundError("FFmpeg is not available in PATH.")
+    def _create_renderer(self, ffmpeg_path: str) -> VideoRenderer:
+        return VideoRenderer(ffmpeg_path, logger=self.logger)
 
-        sibling = Path(resolved_ffmpeg).with_name("ffprobe.exe")
-        resolved_ffprobe = str(sibling.resolve()) if sibling.exists() else ""
-        if not resolved_ffprobe:
-            resolved_ffprobe = which("ffprobe") or which("ffprobe.exe") or ""
-        if not resolved_ffprobe:
-            raise FileNotFoundError("FFprobe is not available in PATH.")
-        return resolved_ffmpeg, resolved_ffprobe
-
-    def _run(self, command: list[str]) -> None:
-        subprocess.run(
-            command,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=CREATE_NO_WINDOW,
+    def _encoder_pool(self, request: VideoRenderRequest, video_renderer: VideoRenderer) -> list[VideoEncoderPlan]:
+        pool = video_renderer.build_encoder_pool(
+            request.video_render_device_preference,
+            encoder_preference=request.video_encoder_preference,
         )
-
-    def _media_duration(self, ffprobe_path: str, file_path: str | Path) -> float:
-        result = subprocess.run(
-            [
-                ffprobe_path,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(file_path),
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=CREATE_NO_WINDOW,
-            text=True,
+        self.logger.info(
+            "Storyboard encoder pool resolved | choice=%s | encoder_preference=%s | pool=%s",
+            request.video_render_device_preference or "Auto",
+            request.video_encoder_preference or "Auto",
+            ", ".join(f"{plan.label}:{plan.encoder_name}" for plan in pool),
         )
-        return max(0.1, float(result.stdout.strip()))
+        return pool
+
+    def _media_duration(self, video_renderer: VideoRenderer, file_path: str | Path) -> float:
+        return video_renderer.ffmpeg.media_duration(file_path)
 
     def _scene_prompt(self, project: VideoProject, scene_index: int, aspect_ratio: str, shot: SceneShot | None = None) -> str:
         return build_cinematic_scene_prompt(
@@ -223,7 +202,7 @@ class StoryboardVideoService:
     def _build_scene_clip(
         self,
         *,
-        ffmpeg_path: str,
+        video_renderer: VideoRenderer,
         image_path: Path,
         audio_path: Path | None,
         target_duration: float,
@@ -232,7 +211,8 @@ class StoryboardVideoService:
         scene_index: int,
         subtitle_path: Path | None,
         output_path: Path,
-    ) -> Path:
+        encoder_plan: VideoEncoderPlan,
+    ) -> tuple[Path, VideoEncoderPlan]:
         frames = max(1, math.ceil(target_duration * SHORTS_FPS))
         overscan_w = width + max(120, width // 6)
         overscan_h = height + max(120, height // 6)
@@ -255,47 +235,52 @@ class StoryboardVideoService:
             filters.append(self._subtitle_filter(subtitle_path, width, height))
         filter_chain = ",".join(filters)
 
-        command = [ffmpeg_path, "-y", "-loop", "1", "-i", str(image_path)]
-        if audio_path:
-            command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
-        else:
-            command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v:0", "-map", "1:a:0"])
+        def build_command(active_plan: VideoEncoderPlan) -> list[str]:
+            command = [video_renderer.ffmpeg.ffmpeg_path, "-y", "-loop", "1", "-i", str(image_path)]
+            if audio_path:
+                command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
+            else:
+                command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v:0", "-map", "1:a:0"])
 
-        command.extend(
-            [
-                "-vf",
-                filter_chain,
-                "-t",
-                f"{target_duration:.3f}",
-                "-shortest",
-                "-r",
-                str(SHORTS_FPS),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-crf",
-                "20",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                "-movflags",
-                "+faststart",
-                str(output_path),
-            ]
-        )
+            command.extend(
+                [
+                    "-vf",
+                    filter_chain,
+                    "-t",
+                    f"{target_duration:.3f}",
+                    "-shortest",
+                    "-r",
+                    str(SHORTS_FPS),
+                ]
+            )
+            command.extend(active_plan.ffmpeg_args)
+            command.extend(
+                [
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "160k",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ]
+            )
+            return command
 
         try:
-            self._run(command)
+            used_plan = video_renderer.run_with_fallback(
+                build_command,
+                encoder_plan,
+                stage_label=f"storyboard-scene-{scene_index + 1}",
+            )
         except subprocess.CalledProcessError:
             if not subtitle_path:
                 raise
             self.logger.warning("Subtitle burn failed for %s. Retrying scene clip without captions.", image_path)
             return self._build_scene_clip(
-                ffmpeg_path=ffmpeg_path,
+                video_renderer=video_renderer,
                 image_path=image_path,
                 audio_path=audio_path,
                 target_duration=target_duration,
@@ -304,13 +289,14 @@ class StoryboardVideoService:
                 scene_index=scene_index,
                 subtitle_path=None,
                 output_path=output_path,
+                encoder_plan=encoder_plan,
             )
-        return output_path
+        return output_path, used_plan
 
     def _finalize_scene_clip(
         self,
         *,
-        ffmpeg_path: str,
+        video_renderer: VideoRenderer,
         visual_video_path: Path,
         audio_path: Path | None,
         target_duration: float,
@@ -318,51 +304,57 @@ class StoryboardVideoService:
         height: int,
         subtitle_path: Path | None,
         output_path: Path,
-    ) -> Path:
-        command = [ffmpeg_path, "-y", "-i", str(visual_video_path)]
-        if audio_path:
-            command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
-        else:
-            command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v:0", "-map", "1:a:0"])
+        encoder_plan: VideoEncoderPlan,
+    ) -> tuple[Path, VideoEncoderPlan]:
+        def build_command(active_plan: VideoEncoderPlan) -> list[str]:
+            command = [video_renderer.ffmpeg.ffmpeg_path, "-y", "-i", str(visual_video_path)]
+            if audio_path:
+                command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
+            else:
+                command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v:0", "-map", "1:a:0"])
 
-        filters: list[str] = []
-        if subtitle_path:
-            filters.append(self._subtitle_filter(subtitle_path, width, height))
-        if filters:
-            command.extend(["-vf", ",".join(filters)])
+            filters: list[str] = []
+            if subtitle_path:
+                filters.append(self._subtitle_filter(subtitle_path, width, height))
+            if filters:
+                command.extend(["-vf", ",".join(filters)])
 
-        command.extend(
-            [
-                "-t",
-                f"{target_duration:.3f}",
-                "-shortest",
-                "-r",
-                str(SHORTS_FPS),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-crf",
-                "20",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                "-movflags",
-                "+faststart",
-                str(output_path),
-            ]
-        )
+            command.extend(
+                [
+                    "-t",
+                    f"{target_duration:.3f}",
+                    "-shortest",
+                    "-r",
+                    str(SHORTS_FPS),
+                ]
+            )
+            command.extend(active_plan.ffmpeg_args)
+            command.extend(
+                [
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "160k",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ]
+            )
+            return command
         try:
-            self._run(command)
+            used_plan = video_renderer.run_with_fallback(
+                build_command,
+                encoder_plan,
+                stage_label=f"storyboard-finalize-{output_path.stem}",
+            )
         except subprocess.CalledProcessError:
             if not subtitle_path:
                 raise
             self.logger.warning("Subtitle burn failed for scene visual %s. Retrying without captions.", visual_video_path)
             return self._finalize_scene_clip(
-                ffmpeg_path=ffmpeg_path,
+                video_renderer=video_renderer,
                 visual_video_path=visual_video_path,
                 audio_path=audio_path,
                 target_duration=target_duration,
@@ -370,18 +362,27 @@ class StoryboardVideoService:
                 height=height,
                 subtitle_path=None,
                 output_path=output_path,
+                encoder_plan=encoder_plan,
             )
-        return output_path
+        return output_path, used_plan
 
     def _write_concat_manifest(self, clip_paths: list[Path], manifest_path: Path) -> None:
         lines = [f"file '{clip.resolve().as_posix()}'" for clip in clip_paths]
         manifest_path.write_text("\n".join(lines), encoding="utf-8")
 
-    def _concat_scene_clips(self, ffmpeg_path: str, clip_paths: list[Path], manifest_path: Path, output_path: Path) -> Path:
+    def _concat_scene_clips(
+        self,
+        video_renderer: VideoRenderer,
+        clip_paths: list[Path],
+        manifest_path: Path,
+        output_path: Path,
+        *,
+        encoder_plan: VideoEncoderPlan,
+    ) -> tuple[Path, VideoEncoderPlan]:
         self._write_concat_manifest(clip_paths, manifest_path)
-        self._run(
-            [
-                ffmpeg_path,
+        def build_command(active_plan: VideoEncoderPlan) -> list[str]:
+            command = [
+                video_renderer.ffmpeg.ffmpeg_path,
                 "-y",
                 "-f",
                 "concat",
@@ -389,24 +390,29 @@ class StoryboardVideoService:
                 "0",
                 "-i",
                 str(manifest_path),
-                "-c:v",
-                "libx264",
-                "-preset",
-                "medium",
-                "-crf",
-                "20",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                "-b:a",
-                "160k",
-                "-movflags",
-                "+faststart",
-                str(output_path),
             ]
+            command.extend(active_plan.ffmpeg_args)
+            command.extend(
+                [
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "160k",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ]
+            )
+            return command
+
+        used_plan = video_renderer.run_with_fallback(
+            build_command,
+            encoder_plan,
+            stage_label=f"storyboard-concat-{output_path.stem}",
         )
-        return output_path
+        return output_path, used_plan
 
     def _render_fallback_scene_image(
         self,
@@ -667,7 +673,10 @@ class StoryboardVideoService:
         progress_callback=None,
         image_paths: list[Path] | None = None,
     ) -> RenderedVideoResult:
-        ffmpeg_path, ffprobe_path = self._resolve_ffmpeg_paths(request.ffmpeg_path)
+        video_renderer = self._create_renderer(request.ffmpeg_path)
+        encoder_pool = self._encoder_pool(request, video_renderer)
+        primary_encoder = encoder_pool[0]
+        render_device_labels = list(dict.fromkeys(plan.label for plan in encoder_pool))
         width, height = self._dimensions_for_ratio(request.aspect_ratio)
 
         target_dir = Path(request.output_dir)
@@ -685,11 +694,12 @@ class StoryboardVideoService:
 
         total_scenes = max(1, len(request.project.scenes))
         self.logger.info(
-            "Starting storyboard shorts render | title=%s | scenes=%s | aspect_ratio=%s | workflow=%s",
+            "Starting storyboard shorts render | title=%s | scenes=%s | aspect_ratio=%s | workflow=%s | render_devices=%s",
             request.project.title,
             total_scenes,
             request.aspect_ratio,
             request.comfyui_workflow_path,
+            ", ".join(render_device_labels),
         )
 
         provided_visuals: dict[int, Path] = {}
@@ -706,17 +716,13 @@ class StoryboardVideoService:
             visuals_dir,
             progress_callback=progress_callback,
         )
-        clip_paths: list[Path] = []
-        ai_visual_count = 0
-        fallback_visual_count = 0
-
+        scene_payloads: list[dict[str, object]] = []
         for index, scene in enumerate(request.project.scenes):
             if progress_callback:
                 progress_callback(
-                    0.42 + ((index / total_scenes) * 0.42),
-                    f"Componiendo short {index + 1}/{total_scenes}...",
+                    0.38 + ((index / total_scenes) * 0.10),
+                    f"Preparando escena {index + 1}/{total_scenes}...",
                 )
-
             try:
                 audio_path = self._scene_audio(request, index, audio_dir)
             except Exception as exc:
@@ -727,8 +733,7 @@ class StoryboardVideoService:
                     exc,
                 )
                 audio_path = None
-
-            duration_seconds = self._media_duration(ffprobe_path, audio_path) if audio_path else float(max(2, scene.duration_seconds))
+            duration_seconds = self._media_duration(video_renderer, audio_path) if audio_path else float(max(2, scene.duration_seconds))
             subtitle_path: Path | None = None
             if request.render_captions:
                 caption_text = self._scene_caption(request.project, index)
@@ -738,11 +743,28 @@ class StoryboardVideoService:
                         duration_seconds,
                         subtitle_dir / f"scene_{scene.scene_number:02d}.srt",
                     )
+            scene_payloads.append(
+                {
+                    "index": index,
+                    "scene": scene,
+                    "audio_path": audio_path,
+                    "duration_seconds": duration_seconds,
+                    "subtitle_path": subtitle_path,
+                }
+            )
 
+        def compose_scene(payload: dict[str, object]) -> tuple[int, Path, int, int, str]:
+            index = int(payload["index"])
+            scene = payload["scene"]
+            assert hasattr(scene, "scene_number")
+            audio_path = payload["audio_path"] if isinstance(payload["audio_path"], Path) else None
+            duration_seconds = float(payload["duration_seconds"])
+            subtitle_path = payload["subtitle_path"] if isinstance(payload["subtitle_path"], Path) else None
+            encoder_plan = encoder_pool[index % len(encoder_pool)]
             if provided_visuals:
                 visual_path = provided_visuals[index]
-                clip_path = self._build_scene_clip(
-                    ffmpeg_path=ffmpeg_path,
+                clip_path, used_plan = self._build_scene_clip(
+                    video_renderer=video_renderer,
                     image_path=visual_path,
                     audio_path=audio_path,
                     target_duration=duration_seconds,
@@ -751,64 +773,113 @@ class StoryboardVideoService:
                     scene_index=index,
                     subtitle_path=subtitle_path,
                     output_path=clips_dir / f"scene_{scene.scene_number:02d}.mp4",
+                    encoder_plan=encoder_plan,
                 )
-            else:
-                shot_plan = self._scene_shots(request.project, index, duration_seconds)
-                shot_clip_paths: list[Path] = []
-                for shot_index, shot in enumerate(shot_plan):
-                    visual_path = ai_visuals.get((index, shot.shot_number))
-                    if visual_path is None:
-                        visual_path = self._render_fallback_scene_image(
-                            request.project,
-                            index,
-                            (width, height),
-                            fallback_dir / f"scene_{scene.scene_number:02d}_shot_{shot.shot_number:02d}.png",
-                            shot=shot,
-                        )
-                        fallback_visual_count += 1
-                    else:
-                        ai_visual_count += 1
-                    shot_clip_paths.append(
-                        self._build_scene_clip(
-                            ffmpeg_path=ffmpeg_path,
-                            image_path=visual_path,
-                            audio_path=None,
-                            target_duration=max(0.4, shot.duration_seconds),
-                            width=width,
-                            height=height,
-                            scene_index=index + shot_index,
-                            subtitle_path=None,
-                            output_path=shot_clips_dir / f"scene_{scene.scene_number:02d}_shot_{shot.shot_number:02d}.mp4",
-                        )
-                    )
+                return index, clip_path, 0, 0, used_plan.encoder_name
 
-                scene_visual_path = self._concat_scene_clips(
-                    ffmpeg_path=ffmpeg_path,
-                    clip_paths=shot_clip_paths,
-                    manifest_path=scene_visuals_dir / f"scene_{scene.scene_number:02d}_manifest.txt",
-                    output_path=scene_visuals_dir / f"scene_{scene.scene_number:02d}_visual.mp4",
-                )
-                clip_path = self._finalize_scene_clip(
-                    ffmpeg_path=ffmpeg_path,
-                    visual_video_path=scene_visual_path,
-                    audio_path=audio_path,
-                    target_duration=duration_seconds,
-                    width=width,
-                    height=height,
-                    subtitle_path=subtitle_path,
-                    output_path=clips_dir / f"scene_{scene.scene_number:02d}.mp4",
-                )
-            clip_paths.append(clip_path)
+            shot_plan = self._scene_shots(request.project, index, duration_seconds)
+            local_ai_visual_count = 0
+            local_fallback_count = 0
+            shot_clip_paths: list[Path] = []
+            used_encoder_names: set[str] = set()
+            for shot_index, shot in enumerate(shot_plan):
+                visual_path = ai_visuals.get((index, shot.shot_number))
+                if visual_path is None:
+                    visual_path = self._render_fallback_scene_image(
+                        request.project,
+                        index,
+                        (width, height),
+                        fallback_dir / f"scene_{scene.scene_number:02d}_shot_{shot.shot_number:02d}.png",
+                        shot=shot,
+                    )
+                    local_fallback_count += 1
+                else:
+                    local_ai_visual_count += 1
+                shot_clip_path, shot_plan_used = self._build_scene_clip(
+                        video_renderer=video_renderer,
+                        image_path=visual_path,
+                        audio_path=None,
+                        target_duration=max(0.4, shot.duration_seconds),
+                        width=width,
+                        height=height,
+                        scene_index=index + shot_index,
+                        subtitle_path=None,
+                        output_path=shot_clips_dir / f"scene_{scene.scene_number:02d}_shot_{shot.shot_number:02d}.mp4",
+                        encoder_plan=encoder_plan,
+                    )
+                shot_clip_paths.append(shot_clip_path)
+                used_encoder_names.add(shot_plan_used.encoder_name)
+
+            scene_visual_path, scene_visual_plan = self._concat_scene_clips(
+                video_renderer=video_renderer,
+                clip_paths=shot_clip_paths,
+                manifest_path=scene_visuals_dir / f"scene_{scene.scene_number:02d}_manifest.txt",
+                output_path=scene_visuals_dir / f"scene_{scene.scene_number:02d}_visual.mp4",
+                encoder_plan=encoder_plan,
+            )
+            used_encoder_names.add(scene_visual_plan.encoder_name)
+            clip_path, final_plan = self._finalize_scene_clip(
+                video_renderer=video_renderer,
+                visual_video_path=scene_visual_path,
+                audio_path=audio_path,
+                target_duration=duration_seconds,
+                width=width,
+                height=height,
+                subtitle_path=subtitle_path,
+                output_path=clips_dir / f"scene_{scene.scene_number:02d}.mp4",
+                encoder_plan=encoder_plan,
+            )
+            used_encoder_names.add(final_plan.encoder_name)
+            return index, clip_path, local_ai_visual_count, local_fallback_count, ",".join(sorted(used_encoder_names))
+
+        clip_results: dict[int, Path] = {}
+        ai_visual_count = 0
+        fallback_visual_count = 0
+        scene_encoder_names: set[str] = set()
+        if len(encoder_pool) > 1 and total_scenes > 1:
+            if progress_callback:
+                progress_callback(0.48, "Distribuyendo escenas entre varias GPU...")
+            with ThreadPoolExecutor(max_workers=min(len(encoder_pool), total_scenes)) as executor:
+                futures = [executor.submit(compose_scene, payload) for payload in scene_payloads]
+                completed = 0
+                for future in as_completed(futures):
+                    index, clip_path, ai_count, fallback_count, used_encoders = future.result()
+                    clip_results[index] = clip_path
+                    ai_visual_count += ai_count
+                    fallback_visual_count += fallback_count
+                    scene_encoder_names.update(filter(None, used_encoders.split(",")))
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(
+                            0.48 + ((completed / total_scenes) * 0.40),
+                            f"Componiendo short {completed}/{total_scenes} con varias GPU...",
+                        )
+        else:
+            for completed, payload in enumerate(scene_payloads, start=1):
+                if progress_callback:
+                    progress_callback(
+                        0.48 + (((completed - 1) / total_scenes) * 0.40),
+                        f"Componiendo short {completed}/{total_scenes}...",
+                    )
+                index, clip_path, ai_count, fallback_count, used_encoders = compose_scene(payload)
+                clip_results[index] = clip_path
+                ai_visual_count += ai_count
+                fallback_visual_count += fallback_count
+                scene_encoder_names.update(filter(None, used_encoders.split(",")))
+
+        clip_paths = [clip_results[index] for index in range(len(request.project.scenes))]
 
         if progress_callback:
             progress_callback(0.90, "Uniendo escenas y finalizando el short...")
         output_path = target_dir / f"{now_stamp()}_{sanitize_filename(request.project.title)}_storyboard.mp4"
-        self._concat_scene_clips(
-            ffmpeg_path=ffmpeg_path,
+        output_path, final_output_plan = self._concat_scene_clips(
+            video_renderer=video_renderer,
             clip_paths=clip_paths,
             manifest_path=session_root / "concat_manifest.txt",
             output_path=output_path,
+            encoder_plan=primary_encoder,
         )
+        scene_encoder_names.add(final_output_plan.encoder_name)
         if progress_callback:
             progress_callback(1.0, "Short visual completado.")
         self.logger.info(
@@ -825,5 +896,8 @@ class StoryboardVideoService:
                 "provided_visual_scenes": len(provided_visuals),
                 "ai_visual_scenes": len(ai_visuals),
                 "fallback_scenes": fallback_visual_count if not provided_visuals else 0,
+                "video_encoder": final_output_plan.encoder_name if len(scene_encoder_names) == 1 else ", ".join(sorted(scene_encoder_names)),
+                "video_encoder_requested": request.video_encoder_preference or "Auto",
+                "video_render_devices": ", ".join(render_device_labels),
             },
         )

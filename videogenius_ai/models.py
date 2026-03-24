@@ -150,6 +150,8 @@ class VideoRenderRequest:
     comfyui_worker_urls: str = ""
     parallel_scene_workers: int = 1
     render_gpu_preference: str = "Auto"
+    video_render_device_preference: str = "Auto"
+    video_encoder_preference: str = "Auto"
     comfyui_checkpoint: str = ""
     comfyui_workflow_path: str = ""
     comfyui_negative_prompt: str = ""

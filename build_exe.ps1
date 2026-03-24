@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $projectRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $entryPoint = Join-Path $projectRoot "videogeniusAI.pyw"
 $iconPath = Join-Path $projectRoot "videogeniusai.ico"
+$localesPath = Join-Path $projectRoot "videogenius_ai\locales"
 $versionPath = Join-Path $projectRoot "videogenius_ai\version.py"
 $pythonExe = Join-Path $projectRoot ".venv\Scripts\python.exe"
 
@@ -16,6 +17,10 @@ if (-not (Test-Path $entryPoint)) {
 
 if (-not (Test-Path $iconPath)) {
     throw "Icon not found: $iconPath"
+}
+
+if (-not (Test-Path $localesPath)) {
+    throw "Locales folder not found: $localesPath"
 }
 
 if (-not (Test-Path $versionPath)) {
@@ -78,6 +83,7 @@ try {
         --windowed `
         --name "videogeniusAI" `
         --icon $iconPath `
+        --add-data "$localesPath;videogenius_ai\locales" `
         --version-file $versionInfoPath `
         --distpath $projectRoot `
         --workpath $workPath `

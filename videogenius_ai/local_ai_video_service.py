@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import subprocess
 import threading
 import textwrap
 from pathlib import Path
-from shutil import which
 
 from .comfyui_client import ComfyUIClient, detect_workflow_output_mode
 from .logging_utils import configure_logging
 from .models import GeneratedSceneAsset, RenderedVideoResult, VideoRenderRequest
 from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
+from .render_devices import VideoEncoderPlan
 from .tts_service import PiperTTSService, WindowsTTSService
 from .utils import now_stamp, sanitize_filename
+from .video_renderer import VideoRenderer
 
 CREATE_NO_WINDOW = 0x08000000
 LOGGER = configure_logging(__name__)
@@ -42,18 +43,12 @@ def _ffmpeg_escape_path(path: str | Path) -> str:
 class LocalAIVideoService:
     def __init__(self, ffmpeg_path: str = "") -> None:
         self.logger = LOGGER
-        resolved_ffmpeg = ffmpeg_path.strip() if ffmpeg_path.strip() and Path(ffmpeg_path).exists() else (which("ffmpeg") or which("ffmpeg.exe"))
-        resolved_ffprobe = ""
-        if resolved_ffmpeg:
-            sibling = Path(resolved_ffmpeg).with_name("ffprobe.exe")
-            if sibling.exists():
-                resolved_ffprobe = str(sibling.resolve())
-        if not resolved_ffprobe:
-            resolved_ffprobe = which("ffprobe") or which("ffprobe.exe") or ""
-        if not resolved_ffmpeg or not resolved_ffprobe:
-            raise FileNotFoundError("FFmpeg and FFprobe must be available in PATH.")
-        self.ffmpeg_path = resolved_ffmpeg
-        self.ffprobe_path = resolved_ffprobe
+        renderer = VideoRenderer(ffmpeg_path, logger=self.logger)
+        self.ffmpeg_path = renderer.ffmpeg.ffmpeg_path
+        self.ffprobe_path = renderer.ffmpeg.ffprobe_path
+
+    def _create_renderer(self, ffmpeg_path: str = "") -> VideoRenderer:
+        return VideoRenderer(ffmpeg_path or self.ffmpeg_path, logger=self.logger)
 
     def _dimensions_for_ratio(self, aspect_ratio: str) -> tuple[int, int]:
         return ASPECT_RATIO_DIMENSIONS.get(aspect_ratio, ASPECT_RATIO_DIMENSIONS["9:16"])
@@ -61,34 +56,21 @@ class LocalAIVideoService:
     def _avatar_dimensions_for_ratio(self, aspect_ratio: str) -> tuple[int, int]:
         return AVATAR_WORKFLOW_DIMENSIONS.get(aspect_ratio, AVATAR_WORKFLOW_DIMENSIONS["9:16"])
 
-    def _run(self, command: list[str]) -> None:
-        subprocess.run(
-            command,
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=CREATE_NO_WINDOW,
+    def _encoder_pool(self, request: VideoRenderRequest, video_renderer: VideoRenderer) -> list[VideoEncoderPlan]:
+        pool = video_renderer.build_encoder_pool(
+            request.video_render_device_preference,
+            encoder_preference=request.video_encoder_preference,
         )
+        self.logger.info(
+            "Local AI encoder pool resolved | choice=%s | encoder_preference=%s | pool=%s",
+            request.video_render_device_preference or "Auto",
+            request.video_encoder_preference or "Auto",
+            ", ".join(f"{plan.label}:{plan.encoder_name}" for plan in pool),
+        )
+        return pool
 
-    def _media_duration(self, file_path: str | Path) -> float:
-        result = subprocess.run(
-            [
-                self.ffprobe_path,
-                "-v",
-                "error",
-                "-show_entries",
-                "format=duration",
-                "-of",
-                "default=noprint_wrappers=1:nokey=1",
-                str(file_path),
-            ],
-            check=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            creationflags=CREATE_NO_WINDOW,
-            text=True,
-        )
-        return max(0.1, float(result.stdout.strip()))
+    def _media_duration(self, video_renderer: VideoRenderer, file_path: str | Path) -> float:
+        return video_renderer.ffmpeg.media_duration(file_path)
 
     def _scene_prompt(self, request: VideoRenderRequest, scene_index: int) -> str:
         scene = request.project.scenes[scene_index]
@@ -178,6 +160,7 @@ class LocalAIVideoService:
     def _build_scene_clip(
         self,
         *,
+        video_renderer: VideoRenderer,
         asset: GeneratedSceneAsset,
         audio_path: Path | None,
         target_duration: float,
@@ -185,49 +168,86 @@ class LocalAIVideoService:
         height: int,
         subtitle_path: Path | None,
         output_path: Path,
-    ) -> Path:
+        encoder_plan: VideoEncoderPlan,
+    ) -> tuple[Path, VideoEncoderPlan]:
         filter_chain = self._build_scene_filter(width, height, subtitle_path)
-        command = [self.ffmpeg_path, "-y"]
+        def build_command(active_plan: VideoEncoderPlan) -> list[str]:
+            command = [video_renderer.ffmpeg.ffmpeg_path, "-y"]
 
-        if asset.asset_type == "video":
-            command.extend(["-stream_loop", "-1", "-i", str(asset.file_path)])
-        else:
-            command.extend(["-loop", "1", "-i", str(asset.file_path)])
+            if asset.asset_type == "video":
+                command.extend(["-stream_loop", "-1", "-i", str(asset.file_path)])
+            else:
+                command.extend(["-loop", "1", "-i", str(asset.file_path)])
 
-        if audio_path:
-            command.extend(["-i", str(audio_path)])
-            command.extend(["-map", "0:v:0", "-map", "1:a:0"])
-        else:
-            command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100"])
-            command.extend(["-map", "0:v:0", "-map", "1:a:0"])
+            if audio_path:
+                command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
+            else:
+                command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v:0", "-map", "1:a:0"])
 
-        command.extend(
-            [
-                "-vf",
-                filter_chain,
-                "-t",
-                f"{target_duration:.3f}",
-                "-shortest",
-                "-r",
-                "30",
-                "-c:v",
-                "libx264",
-                "-pix_fmt",
-                "yuv420p",
-                "-c:a",
-                "aac",
-                str(output_path),
-            ]
-        )
-        self._run(command)
-        return output_path
+            command.extend(
+                [
+                    "-vf",
+                    filter_chain,
+                    "-t",
+                    f"{target_duration:.3f}",
+                    "-shortest",
+                    "-r",
+                    "30",
+                ]
+            )
+            command.extend(active_plan.ffmpeg_args)
+            command.extend(
+                [
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "160k",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ]
+            )
+            return command
 
-    def _concat_scene_clips(self, clip_paths: list[Path], manifest_path: Path, output_path: Path) -> Path:
+        try:
+            used_plan = video_renderer.run_with_fallback(
+                build_command,
+                encoder_plan,
+                stage_label=f"local-ai-scene-{output_path.stem}",
+            )
+        except subprocess.CalledProcessError:
+            if not subtitle_path:
+                raise
+            self.logger.warning("Subtitle burn failed for %s. Retrying scene clip without captions.", asset.file_path)
+            return self._build_scene_clip(
+                video_renderer=video_renderer,
+                asset=asset,
+                audio_path=audio_path,
+                target_duration=target_duration,
+                width=width,
+                height=height,
+                subtitle_path=None,
+                output_path=output_path,
+                encoder_plan=encoder_plan,
+            )
+        return output_path, used_plan
+
+    def _concat_scene_clips(
+        self,
+        video_renderer: VideoRenderer,
+        clip_paths: list[Path],
+        manifest_path: Path,
+        output_path: Path,
+        *,
+        encoder_plan: VideoEncoderPlan,
+    ) -> tuple[Path, VideoEncoderPlan]:
         lines = [f"file '{clip.as_posix()}'" for clip in clip_paths]
         manifest_path.write_text("\n".join(lines), encoding="utf-8")
-        self._run(
-            [
-                self.ffmpeg_path,
+        def build_command(active_plan: VideoEncoderPlan) -> list[str]:
+            command = [
+                video_renderer.ffmpeg.ffmpeg_path,
                 "-y",
                 "-f",
                 "concat",
@@ -235,12 +255,29 @@ class LocalAIVideoService:
                 "0",
                 "-i",
                 str(manifest_path),
-                "-c",
-                "copy",
-                str(output_path),
             ]
+            command.extend(active_plan.ffmpeg_args)
+            command.extend(
+                [
+                    "-pix_fmt",
+                    "yuv420p",
+                    "-c:a",
+                    "aac",
+                    "-b:a",
+                    "160k",
+                    "-movflags",
+                    "+faststart",
+                    str(output_path),
+                ]
+            )
+            return command
+
+        used_plan = video_renderer.run_with_fallback(
+            build_command,
+            encoder_plan,
+            stage_label=f"local-ai-concat-{output_path.stem}",
         )
-        return output_path
+        return output_path, used_plan
 
     def _generate_assets(
         self,
@@ -455,14 +492,19 @@ class LocalAIVideoService:
         for directory in [assets_dir, audio_dir, subtitle_dir, clips_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 
+        video_renderer = self._create_renderer(request.ffmpeg_path)
+        encoder_pool = self._encoder_pool(request, video_renderer)
+        primary_encoder = encoder_pool[0]
+        render_device_labels = list(dict.fromkeys(plan.label for plan in encoder_pool))
         width, height = self._dimensions_for_ratio(request.aspect_ratio)
         total_scenes = max(1, len(request.project.scenes))
         self.logger.info(
-            "Starting Local Avatar render | title=%s | scenes=%s | avatar_image=%s | workflow=%s",
+            "Starting Local Avatar render | title=%s | scenes=%s | avatar_image=%s | workflow=%s | render_devices=%s",
             request.project.title,
             total_scenes,
             avatar_image_path,
             request.comfyui_workflow_path,
+            ", ".join(render_device_labels),
         )
         generated_assets, generated_audio = self._generate_avatar_assets(
             request=request,
@@ -472,10 +514,10 @@ class LocalAIVideoService:
             progress_callback=progress_callback,
         )
 
-        clip_paths: list[Path] = []
+        scene_payloads: list[dict[str, object]] = []
         for index, scene in enumerate(request.project.scenes):
             audio_path = generated_audio[index]
-            duration_seconds = self._media_duration(audio_path)
+            duration_seconds = self._media_duration(video_renderer, audio_path)
             subtitle_path: Path | None = None
             if request.render_captions:
                 caption_text = self._scene_caption(request, index)
@@ -485,12 +527,26 @@ class LocalAIVideoService:
                         duration_seconds,
                         subtitle_dir / f"scene_{scene.scene_number:02d}.srt",
                     )
-            if progress_callback:
-                progress_callback(
-                    0.58 + ((index / total_scenes) * 0.30),
-                    f"Componiendo clip avatar {index + 1}/{total_scenes}...",
-                )
-            clip_path = self._build_scene_clip(
+            scene_payloads.append(
+                {
+                    "index": index,
+                    "scene": scene,
+                    "audio_path": audio_path,
+                    "duration_seconds": duration_seconds,
+                    "subtitle_path": subtitle_path,
+                }
+            )
+
+        def compose_scene(payload: dict[str, object]) -> tuple[int, Path, str]:
+            index = int(payload["index"])
+            scene = payload["scene"]
+            assert hasattr(scene, "scene_number")
+            audio_path = payload["audio_path"] if isinstance(payload["audio_path"], Path) else None
+            duration_seconds = float(payload["duration_seconds"])
+            subtitle_path = payload["subtitle_path"] if isinstance(payload["subtitle_path"], Path) else None
+            encoder_plan = encoder_pool[index % len(encoder_pool)]
+            clip_path, used_plan = self._build_scene_clip(
+                video_renderer=video_renderer,
                 asset=generated_assets[index],
                 audio_path=audio_path,
                 target_duration=duration_seconds,
@@ -498,17 +554,52 @@ class LocalAIVideoService:
                 height=height,
                 subtitle_path=subtitle_path,
                 output_path=clips_dir / f"scene_{scene.scene_number:02d}.mp4",
+                encoder_plan=encoder_plan,
             )
-            clip_paths.append(clip_path)
+            return index, clip_path, used_plan.encoder_name
+
+        clip_results: dict[int, Path] = {}
+        scene_encoder_names: set[str] = set()
+        if len(encoder_pool) > 1 and total_scenes > 1:
+            if progress_callback:
+                progress_callback(0.58, "Componiendo clips avatar en varias GPU...")
+            with ThreadPoolExecutor(max_workers=min(len(encoder_pool), total_scenes)) as executor:
+                futures = [executor.submit(compose_scene, payload) for payload in scene_payloads]
+                completed = 0
+                for future in as_completed(futures):
+                    index, clip_path, encoder_name = future.result()
+                    clip_results[index] = clip_path
+                    scene_encoder_names.add(encoder_name)
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(
+                            0.58 + ((completed / total_scenes) * 0.30),
+                            f"Componiendo clip avatar {completed}/{total_scenes}...",
+                        )
+        else:
+            for completed, payload in enumerate(scene_payloads, start=1):
+                if progress_callback:
+                    progress_callback(
+                        0.58 + (((completed - 1) / total_scenes) * 0.30),
+                        f"Componiendo clip avatar {completed}/{total_scenes}...",
+                    )
+                index, clip_path, encoder_name = compose_scene(payload)
+                clip_results[index] = clip_path
+                scene_encoder_names.add(encoder_name)
+
+        clip_paths = [clip_results[index] for index in range(len(request.project.scenes))]
 
         if progress_callback:
             progress_callback(0.92, "Uniendo clips avatar y finalizando el MP4...")
         output_path = Path(request.output_dir) / f"{now_stamp()}_{sanitize_filename(request.project.title)}_local_avatar.mp4"
-        self._concat_scene_clips(
+        output_path, final_output_plan = self._concat_scene_clips(
+            video_renderer=video_renderer,
             clip_paths=clip_paths,
             manifest_path=session_root / "concat_manifest.txt",
             output_path=output_path,
+            encoder_plan=primary_encoder,
         )
+        scene_encoder_names.add(final_output_plan.encoder_name)
         if progress_callback:
             progress_callback(1.0, "Video avatar completado.")
         self.logger.info(
@@ -523,6 +614,9 @@ class LocalAIVideoService:
                 "session_root": str(session_root),
                 "avatar_image_path": str(avatar_image_path),
                 "scenes_rendered": total_scenes,
+                "video_encoder": final_output_plan.encoder_name if len(scene_encoder_names) == 1 else ", ".join(sorted(scene_encoder_names)),
+                "video_encoder_requested": request.video_encoder_preference or "Auto",
+                "video_render_devices": ", ".join(render_device_labels),
             },
         )
 
@@ -546,17 +640,21 @@ class LocalAIVideoService:
         for directory in [assets_dir, audio_dir, subtitle_dir, clips_dir]:
             directory.mkdir(parents=True, exist_ok=True)
 
+        video_renderer = self._create_renderer(request.ffmpeg_path)
+        encoder_pool = self._encoder_pool(request, video_renderer)
+        primary_encoder = encoder_pool[0]
+        render_device_labels = list(dict.fromkeys(plan.label for plan in encoder_pool))
         width, height = self._dimensions_for_ratio(request.aspect_ratio)
-        clip_paths: list[Path] = []
         total_scenes = max(1, len(request.project.scenes))
         effective_workers = self._effective_worker_count(request, total_scenes)
         self.logger.info(
-            "Starting Local AI render | title=%s | scenes=%s | workers=%s | aspect_ratio=%s | workflow=%s",
+            "Starting Local AI render | title=%s | scenes=%s | workers=%s | aspect_ratio=%s | workflow=%s | render_devices=%s",
             request.project.title,
             total_scenes,
             effective_workers,
             request.aspect_ratio,
             request.comfyui_workflow_path,
+            ", ".join(render_device_labels),
         )
         if progress_callback:
             progress_callback(0.04, "Detectando workers de ComfyUI y preparando render IA...")
@@ -566,9 +664,10 @@ class LocalAIVideoService:
             progress_callback=progress_callback,
         )
 
+        scene_payloads: list[dict[str, object]] = []
         for index, scene in enumerate(request.project.scenes):
             audio_path = self._scene_audio(request, index, audio_dir)
-            duration_seconds = self._media_duration(audio_path) if audio_path else float(scene.duration_seconds)
+            duration_seconds = self._media_duration(video_renderer, audio_path) if audio_path else float(scene.duration_seconds)
             subtitle_path: Path | None = None
             if request.render_captions:
                 caption_text = self._scene_caption(request, index)
@@ -578,13 +677,26 @@ class LocalAIVideoService:
                         duration_seconds,
                         subtitle_dir / f"scene_{scene.scene_number:02d}.srt",
                     )
+            scene_payloads.append(
+                {
+                    "index": index,
+                    "scene": scene,
+                    "audio_path": audio_path,
+                    "duration_seconds": duration_seconds,
+                    "subtitle_path": subtitle_path,
+                }
+            )
 
-            if progress_callback:
-                progress_callback(
-                    0.6 + ((index / total_scenes) * 0.28),
-                    f"Componiendo clip {index + 1}/{total_scenes} de la escena {scene.scene_number}...",
-                )
-            clip_path = self._build_scene_clip(
+        def compose_scene(payload: dict[str, object]) -> tuple[int, Path, str]:
+            index = int(payload["index"])
+            scene = payload["scene"]
+            assert hasattr(scene, "scene_number")
+            audio_path = payload["audio_path"] if isinstance(payload["audio_path"], Path) else None
+            duration_seconds = float(payload["duration_seconds"])
+            subtitle_path = payload["subtitle_path"] if isinstance(payload["subtitle_path"], Path) else None
+            encoder_plan = encoder_pool[index % len(encoder_pool)]
+            clip_path, used_plan = self._build_scene_clip(
+                video_renderer=video_renderer,
                 asset=generated_assets[index],
                 audio_path=audio_path,
                 target_duration=duration_seconds,
@@ -592,17 +704,54 @@ class LocalAIVideoService:
                 height=height,
                 subtitle_path=subtitle_path,
                 output_path=clips_dir / f"scene_{scene.scene_number:02d}.mp4",
+                encoder_plan=encoder_plan,
             )
-            clip_paths.append(clip_path)
+            return index, clip_path, used_plan.encoder_name
+
+        clip_results: dict[int, Path] = {}
+        scene_encoder_names: set[str] = set()
+        if len(encoder_pool) > 1 and total_scenes > 1:
+            if progress_callback:
+                progress_callback(0.60, "Componiendo clips con varias GPU...")
+            with ThreadPoolExecutor(max_workers=min(len(encoder_pool), total_scenes)) as executor:
+                futures = [executor.submit(compose_scene, payload) for payload in scene_payloads]
+                completed = 0
+                for future in as_completed(futures):
+                    index, clip_path, encoder_name = future.result()
+                    clip_results[index] = clip_path
+                    scene_encoder_names.add(encoder_name)
+                    completed += 1
+                    if progress_callback:
+                        progress_callback(
+                            0.60 + ((completed / total_scenes) * 0.28),
+                            f"Componiendo clip {completed}/{total_scenes}...",
+                        )
+        else:
+            for completed, payload in enumerate(scene_payloads, start=1):
+                if progress_callback:
+                    scene = payload["scene"]
+                    assert hasattr(scene, "scene_number")
+                    progress_callback(
+                        0.60 + (((completed - 1) / total_scenes) * 0.28),
+                        f"Componiendo clip {completed}/{total_scenes} de la escena {scene.scene_number}...",
+                    )
+                index, clip_path, encoder_name = compose_scene(payload)
+                clip_results[index] = clip_path
+                scene_encoder_names.add(encoder_name)
+
+        clip_paths = [clip_results[index] for index in range(len(request.project.scenes))]
 
         if progress_callback:
             progress_callback(0.92, "Uniendo clips y finalizando el MP4...")
         output_path = Path(request.output_dir) / f"{now_stamp()}_{sanitize_filename(request.project.title)}_local_ai.mp4"
-        self._concat_scene_clips(
+        output_path, final_output_plan = self._concat_scene_clips(
+            video_renderer=video_renderer,
             clip_paths=clip_paths,
             manifest_path=session_root / "concat_manifest.txt",
             output_path=output_path,
+            encoder_plan=primary_encoder,
         )
+        scene_encoder_names.add(final_output_plan.encoder_name)
         if progress_callback:
             progress_callback(1.0, "Video final completado.")
         self.logger.info(
@@ -618,5 +767,8 @@ class LocalAIVideoService:
                 "session_root": str(session_root),
                 "workers_used": effective_workers,
                 "scenes_rendered": total_scenes,
+                "video_encoder": final_output_plan.encoder_name if len(scene_encoder_names) == 1 else ", ".join(sorted(scene_encoder_names)),
+                "video_encoder_requested": request.video_encoder_preference or "Auto",
+                "video_render_devices": ", ".join(render_device_labels),
             },
         )
