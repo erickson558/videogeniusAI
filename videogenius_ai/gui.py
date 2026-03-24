@@ -30,6 +30,7 @@ from .paths import APP_ROOT
 from .prompt_director import summarize_scene_shots
 from .render_devices import describe_render_selection
 from .setup_manager import COMFYUI_PACKAGE_ID, LM_STUDIO_PACKAGE_ID, SetupManager, SetupStatus
+from .utils import brief_requests_silent_narration
 from .version import APP_NAME, DISPLAY_VERSION
 from .video_render_service import VideoRenderService
 
@@ -1384,6 +1385,25 @@ class VideoGeniusApp(ctk.CTk):
             max_tokens=self._safe_positive_int(self.max_tokens_var.get(), 2800),
         )
 
+    def _project_requests_silent_narration(self, project: VideoProject | None = None) -> bool:
+        if project is not None and project.source_topic.strip():
+            return brief_requests_silent_narration(project.source_topic)
+        if hasattr(self, "topic_text"):
+            return brief_requests_silent_narration(self.topic_text.get("1.0", "end-1c"))
+        return False
+
+    def _apply_silent_narration_override(self, project: VideoProject | None = None, provider: str | None = None) -> bool:
+        active_provider = (provider or self.video_provider_var.get().strip() or "Storyboard local").strip()
+        if active_provider == "Local Avatar video":
+            return False
+        if not self._project_requests_silent_narration(project):
+            return False
+        if self.tts_backend_var.get().strip() != "Sin voz":
+            self.tts_backend_var.set("Sin voz")
+            self._schedule_save()
+        self._set_status(self.t("status.silent_brief_forcing_no_voice"), success=True)
+        return True
+
     def _build_video_render_request(self) -> VideoRenderRequest:
         if not self.current_project:
             raise ValueError("Generate or load a project before creating the final video.")
@@ -1441,6 +1461,9 @@ class VideoGeniusApp(ctk.CTk):
 
     def _build_video_render_request_for_project(self, project: VideoProject, settings: dict[str, Any] | None = None) -> VideoRenderRequest:
         options = settings or self._capture_video_render_settings()
+        effective_tts_backend = options["tts_backend"]
+        if self._project_requests_silent_narration(project) and options["provider"] != "Local Avatar video":
+            effective_tts_backend = "Sin voz"
         return VideoRenderRequest(
             project=project,
             output_dir=options["output_dir"],
@@ -1458,7 +1481,7 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_workflow_path=options["comfyui_workflow_path"],
             comfyui_negative_prompt=options["comfyui_negative_prompt"],
             comfyui_poll_interval_seconds=options["comfyui_poll_interval_seconds"],
-            tts_backend=options["tts_backend"],
+            tts_backend=effective_tts_backend,
             ffmpeg_path=options["ffmpeg_path"],
             piper_executable_path=options["piper_executable_path"],
             piper_model_path=options["piper_model_path"],
@@ -2304,6 +2327,7 @@ class VideoGeniusApp(ctk.CTk):
                 request.generation_mode = "Proyecto completo"
                 self.mode_var.set("Proyecto completo")
                 self._schedule_save()
+            self._apply_silent_narration_override(provider=self.video_provider_var.get().strip() or "Storyboard local")
             retry_attempts = self._safe_positive_int(self.retries_var.get(), 3)
             render_settings = self._capture_video_render_settings()
         except Exception as exc:
@@ -2430,6 +2454,7 @@ class VideoGeniusApp(ctk.CTk):
 
     def generate_video(self) -> None:
         try:
+            self._apply_silent_narration_override(self.current_project)
             render_request = self._build_video_render_request()
         except Exception as exc:
             self._set_status(str(exc), error=True)

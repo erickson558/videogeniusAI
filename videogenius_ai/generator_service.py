@@ -9,7 +9,7 @@ from .lmstudio_client import LMStudioClient
 from .logging_utils import configure_logging
 from .models import GenerationRequest, Scene, SceneShot, VideoProject
 from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
-from .utils import parse_json_payload, safe_float, safe_int
+from .utils import brief_requests_silent_narration, parse_json_payload, safe_float, safe_int
 
 ProgressCallback = Callable[[float, str], None]
 
@@ -204,6 +204,7 @@ class SceneGeneratorService:
         pack = self._fallback_language_pack(request.output_language)
         scene_titles = pack["scene_titles"]
         assert isinstance(scene_titles, list)
+        silent_narration = brief_requests_silent_narration(request.topic)
 
         scenes: list[dict[str, Any]] = []
         default_duration = max(1, request.total_duration_seconds // max(1, request.scene_count))
@@ -245,10 +246,12 @@ class SceneGeneratorService:
                 f"Keep the tone {request.narrative_tone.lower()} and adapt it for {request.audience.lower()}."
             )
             direction = self._fallback_scene_direction(fallback_request, index)
-            narration = (
-                f"{pack['narration_prefix']} {index + 1}, present a clear part of {short_topic} "
-                f"for a {request.video_format} in {request.output_language}."
-            )
+            narration = ""
+            if not silent_narration:
+                narration = (
+                    f"{pack['narration_prefix']} {index + 1}, present a clear part of {short_topic} "
+                    f"for a {request.video_format} in {request.output_language}."
+                )
             visual_prompt = (
                 f"{effective_visual_style}, {request.video_format}, scene {index + 1}, {short_topic}, {theme_seed}, "
                 f"cinematic composition, {direction['lighting_style']}, {direction['color_palette']}, high detail"
@@ -357,6 +360,7 @@ class SceneGeneratorService:
         )
 
         topic_focus = self._brief_focus(request.topic)
+        silent_narration = brief_requests_silent_narration(request.topic)
         user_message = (
             "Create a video project in JSON for the following request.\n"
             f"Primary theme to develop: {topic_focus}\n"
@@ -374,7 +378,6 @@ class SceneGeneratorService:
             "- Keep the language consistent with the requested output language.\n"
             "- Distribute the total duration across all scenes.\n"
             "- Make scene titles concise.\n"
-            "- Make narration ready to read aloud.\n"
             "- Build the video around one clear theme derived from the brief instead of repeating the brief word for word.\n"
             "- Do not narrate operational prompt phrases like 'generate a unique YouTube Shorts video', 'this prompt', or 'every time this prompt is run' unless the requested topic is explicitly prompt engineering.\n"
             "- For each scene, include cinematic_intent, camera_language, lighting_style, color_palette, energy_level, and negative_prompt.\n"
@@ -384,6 +387,10 @@ class SceneGeneratorService:
             "- Return strict JSON with this structure:\n"
             f"{json.dumps(schema, ensure_ascii=False, indent=2)}"
         )
+        if silent_narration:
+            user_message += "\n- The brief explicitly requests no narration. Set narration to an empty string for every scene.\n"
+        else:
+            user_message += "\n- Make narration ready to read aloud.\n"
 
         if previous_response:
             user_message += (
@@ -488,6 +495,8 @@ class SceneGeneratorService:
             energy_level=str(item.get("energy_level") or item.get("energy") or ""),
             negative_prompt=str(item.get("negative_prompt") or ""),
         )
+        if brief_requests_silent_narration(request.topic):
+            scene.narration = ""
         scene.shots = self._normalize_shots(item, request, scene, index)
 
         if request.generation_mode == "Solo guion":

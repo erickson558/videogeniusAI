@@ -34,7 +34,7 @@ from videogenius_ai.models import GenerationRequest, RenderedVideoResult, VideoP
 from videogenius_ai.video_render_service import VideoRenderService
 from videogenius_ai.video_renderer import VideoRenderer
 from videogenius_ai.video_service import StoryboardVideoService
-from videogenius_ai.utils import parse_json_payload
+from videogenius_ai.utils import brief_requests_silent_narration, parse_json_payload
 
 
 class JsonParsingTests(unittest.TestCase):
@@ -73,6 +73,13 @@ scenes: [
         raw = '{"title":"Demo","summary":"Linea 1\nLinea 2","scenes":[{"scene_number":1}]}'
         payload = parse_json_payload(raw)
         self.assertEqual(payload["summary"], "Linea 1\nLinea 2")
+
+
+class BriefIntentTests(unittest.TestCase):
+    def test_brief_requests_silent_narration_detects_spanish_and_english_variants(self) -> None:
+        self.assertTrue(brief_requests_silent_narration("Genera un video fantastico sin narración sobre IA"))
+        self.assertTrue(brief_requests_silent_narration("Create a cinematic short without narration or voiceover"))
+        self.assertFalse(brief_requests_silent_narration("Create a narrated video about AI"))
 
 
 class LMStudioModelSelectionTests(unittest.TestCase):
@@ -189,6 +196,25 @@ class GenerationNormalizationTests(unittest.TestCase):
         self.assertIn("technology", project.title.lower())
         self.assertIn("anime", project.scenes[0].visual_prompt.lower())
 
+    def test_generate_fallback_project_respects_no_narration_brief(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic="Genera un video fantastico sobre IA sin narración",
+            visual_style="Cyberpunk",
+            audience="General",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=20,
+            scene_count=2,
+            generation_mode="Proyecto completo",
+            model="",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        project = service.generate_fallback_project(request)
+        self.assertTrue(all(not scene.narration for scene in project.scenes))
+
     def test_normalize_project_preserves_shot_plan_and_direction_fields(self) -> None:
         service = SceneGeneratorService()
         request = GenerationRequest(
@@ -273,6 +299,37 @@ class GenerationNormalizationTests(unittest.TestCase):
         self.assertEqual(len(scene.shots), 2)
         self.assertEqual(scene.shots[0].camera_motion, "slow push-in")
         self.assertAlmostEqual(sum(shot.duration_seconds for shot in scene.shots), 12.0, places=1)
+
+    def test_normalize_project_clears_narration_when_brief_requests_silent_output(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic="Video de ciencia ficcion sin narracion",
+            visual_style="Cinematic",
+            audience="General",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=10,
+            scene_count=1,
+            generation_mode="Proyecto completo",
+            model="model",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        project = service.normalize_project(
+            {
+                "title": "Demo",
+                "summary": "Summary",
+                "general_script": "Script",
+                "structure": "Hook",
+                "scenes": [
+                    {"scene_number": 1, "scene_title": "One", "description": "Desc 1", "narration": "Esta voz no deberia quedar", "duration_seconds": 10},
+                ],
+            },
+            request,
+            raw_response="{}",
+        )
+        self.assertEqual(project.scenes[0].narration, "")
 
 
 class ExportTests(unittest.TestCase):

@@ -1,5 +1,10 @@
 # Changelog
 
+## V0.1.2 - 2026-03-24
+
+- Fixed silent-video briefs so narration is removed from generated scenes and TTS is disabled automatically for non-avatar renders.
+- Added regression coverage for no-narration intent detection and normalization.
+
 ## V0.1.1 - 2026-03-24
 
 - Added GPU-aware FFmpeg render selection with automatic CPU fallback on hardware encode failure.

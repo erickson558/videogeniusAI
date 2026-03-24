@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import unicodedata
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -80,6 +81,29 @@ def repair_json_candidate(text: str) -> str:
         candidate,
     )
     return candidate
+
+
+def normalize_search_text(text: str) -> str:
+    normalized = unicodedata.normalize("NFKD", (text or "").casefold())
+    return "".join(character for character in normalized if not unicodedata.combining(character))
+
+
+def brief_requests_silent_narration(text: str) -> bool:
+    normalized = normalize_search_text(text)
+    patterns = [
+        r"\bsin narracion\b",
+        r"\bsin voz\b",
+        r"\bno narration\b",
+        r"\bwithout narration\b",
+        r"\bno voiceover\b",
+        r"\bwithout voiceover\b",
+        r"\bno voice\b",
+        r"\bwithout voice\b",
+        r"\bsilent video\b",
+        r"\bvideo mudo\b",
+        r"\bmute\b",
+    ]
+    return any(re.search(pattern, normalized) for pattern in patterns)
 
 
 def _escape_control_chars_in_strings(text: str) -> str:

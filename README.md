@@ -1,6 +1,6 @@
 # VideoGeniusAI
 
-Current app version: `V0.1.1`
+Current app version: `V0.1.2`
 
 VideoGeniusAI is a Windows desktop application built in Python that turns a prompt into a structured short-form video project and can render the final MP4 locally.
 
