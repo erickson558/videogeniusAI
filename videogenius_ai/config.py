@@ -112,11 +112,15 @@ class ConfigManager:
             return config
 
         payload = asdict(AppConfig())
-        payload.update(raw if isinstance(raw, dict) else {})
+        persisted = raw if isinstance(raw, dict) else {}
+        payload.update(persisted)
         payload["app_version"] = DISPLAY_VERSION
         payload["ui_language"] = normalize_ui_language(str(payload.get("ui_language", DEFAULT_UI_LANGUAGE)))
         payload["window_geometry"] = sanitize_window_geometry(str(payload.get("window_geometry", DEFAULT_WINDOW_GEOMETRY)))
-        return AppConfig(**payload)
+        config = AppConfig(**payload)
+        if persisted != asdict(config):
+            self._write(config)
+        return config
 
     def _write(self, config: AppConfig | None = None) -> None:
         data = asdict(config or self.config)

@@ -1,6 +1,6 @@
 # VideoGeniusAI
 
-Current app version: `V0.1.2`
+Current app version: `V0.1.3`
 
 VideoGeniusAI is a Windows desktop application built in Python that turns a prompt into a structured short-form video project and can render the final MP4 locally.
 
@@ -84,7 +84,7 @@ The app creates local runtime files such as `config.json`, `log.txt`, `history/`
 
 1. Start `LM Studio` and enable the local server.
 2. Run `VideoGeniusAI`.
-3. Write your prompt in `Project brief`.
+3. Write your creative brief in `Project brief` (for example: `Un short cinematografico sobre astronautas perdidos en Marte`).
 4. Choose the generation mode and render backend.
 5. Click `Generar video completo`.
 

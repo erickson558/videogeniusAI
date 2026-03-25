@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import unittest
@@ -30,11 +31,12 @@ from videogenius_ai.render_devices import (
     detect_gpu_devices,
 )
 from videogenius_ai.setup_manager import SetupManager
+from videogenius_ai.version import DISPLAY_VERSION
 from videogenius_ai.models import GenerationRequest, RenderedVideoResult, VideoProject
 from videogenius_ai.video_render_service import VideoRenderService
 from videogenius_ai.video_renderer import VideoRenderer
 from videogenius_ai.video_service import StoryboardVideoService
-from videogenius_ai.utils import brief_requests_silent_narration, parse_json_payload
+from videogenius_ai.utils import brief_requests_silent_narration, normalize_search_text, parse_json_payload
 
 
 class JsonParsingTests(unittest.TestCase):
@@ -214,6 +216,52 @@ class GenerationNormalizationTests(unittest.TestCase):
         )
         project = service.generate_fallback_project(request)
         self.assertTrue(all(not scene.narration for scene in project.scenes))
+
+    def test_generate_fallback_project_strips_spanish_prompt_commands_from_theme(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic="Genera un video cinematografico sobre astronautas perdidos en Marte sin narración",
+            visual_style="Cinematic",
+            audience="General",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=18,
+            scene_count=3,
+            generation_mode="Proyecto completo",
+            model="",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        project = service.generate_fallback_project(request)
+        normalized_title = normalize_search_text(project.title)
+        normalized_prompt = normalize_search_text(project.scenes[0].visual_prompt)
+        self.assertIn("astronautas perdidos en marte", normalized_title)
+        self.assertIn("astronautas perdidos en marte", normalized_prompt)
+        self.assertNotIn("genera", normalized_title)
+        self.assertNotIn("sin narracion", normalized_title)
+        self.assertTrue(all(not scene.narration for scene in project.scenes))
+
+    def test_generate_fallback_project_localizes_spanish_copy(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic="Crea un video sobre una ciudad futurista con drones y lluvia neon",
+            visual_style="Cyberpunk",
+            audience="Profesionales",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=18,
+            scene_count=3,
+            generation_mode="Proyecto completo",
+            model="",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        project = service.generate_fallback_project(request)
+        self.assertNotIn("focused on", project.scenes[0].description.casefold())
+        self.assertIn("escena 1", project.scenes[0].description.casefold())
+        self.assertIn("en esta escena 1", project.scenes[0].narration.casefold())
 
     def test_normalize_project_preserves_shot_plan_and_direction_fields(self) -> None:
         service = SceneGeneratorService()
@@ -410,6 +458,25 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(sanitize_window_geometry("160x160+50+50"), "1460x900+80+40")
         self.assertEqual(sanitize_window_geometry("bad-value"), "1460x900+80+40")
         self.assertEqual(sanitize_window_geometry("1460x900+80+40"), "1460x900+80+40")
+
+    def test_config_load_rewrites_stale_app_version(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "app_version": "V0.0.1",
+                        "ui_language": "es",
+                        "window_geometry": "bad-value",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = ConfigManager(config_path=config_path)
+            self.assertEqual(manager.config.app_version, DISPLAY_VERSION)
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["app_version"], DISPLAY_VERSION)
+            self.assertEqual(persisted["window_geometry"], "1460x900+80+40")
 
 
 class InternationalizationTests(unittest.TestCase):

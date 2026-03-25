@@ -9,49 +9,140 @@ from .lmstudio_client import LMStudioClient
 from .logging_utils import configure_logging
 from .models import GenerationRequest, Scene, SceneShot, VideoProject
 from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
-from .utils import brief_requests_silent_narration, parse_json_payload, safe_float, safe_int
+from .utils import brief_requests_silent_narration, normalize_search_text, parse_json_payload, safe_float, safe_int
 
 ProgressCallback = Callable[[float, str], None]
 
 LOGGER = configure_logging(__name__)
+
+BRIEF_META_MARKERS = (
+    "this prompt",
+    "prompt is run",
+    "every time",
+    "vary the theme",
+    "theme randomly",
+    "different visual style",
+    "visual style each time",
+    "cada vez que",
+    "cada vez",
+    "tema aleatorio",
+    "estilo visual",
+)
+BRIEF_INSTRUCTION_ONLY_PREFIXES = (
+    "use ",
+    "include ",
+    "ensure ",
+    "do not ",
+    "change ",
+    "vary ",
+    "usa ",
+    "utiliza ",
+    "incluye ",
+    "asegura ",
+    "no ",
+    "cambia ",
+    "varia ",
+)
+BRIEF_COMMAND_PREFIXES = (
+    "generate",
+    "create",
+    "make",
+    "write",
+    "turn",
+    "produce",
+    "genera",
+    "crea",
+    "haz",
+    "escribe",
+    "produce",
+)
+BRIEF_MEDIA_PATTERN = r"(?:youtube\s+shorts?|short-form\s+video|shorts?|reels?|clips?|cortos?|v[ií]deos?|videos?)"
+BRIEF_STYLE_FILLER_TOKENS = {
+    "cinematic",
+    "cinematographic",
+    "cinematografico",
+    "cinematografica",
+    "fantastico",
+    "fantastica",
+    "epic",
+    "dramatic",
+    "dramatico",
+    "dramatica",
+    "immersive",
+    "inmersivo",
+    "inmersiva",
+    "premium",
+    "viral",
+    "short",
+}
+SILENT_BRIEF_PATTERN = re.compile(
+    r"\b(?:sin narraci[oó]n|sin voz|no narration|without narration|no voiceover|without voiceover|"
+    r"no voice|without voice|silent video|video mudo|mute)\b",
+    flags=re.IGNORECASE,
+)
 
 
 class SceneGeneratorService:
     def __init__(self) -> None:
         self.logger = LOGGER
 
-    def _brief_focus(self, topic: str) -> str:
-        cleaned_lines = []
+    def _brief_lines(self, topic: str) -> list[str]:
+        cleaned_lines: list[str] = []
         for raw_line in str(topic or "").splitlines():
             line = raw_line.strip().strip("-* ").strip()
             if not line:
                 continue
             line = re.sub(r"^(topic|tema)\s*:\s*", "", line, flags=re.IGNORECASE)
-            line = re.sub(r"^(video|vídeo)\s+(about|sobre)\s+", "", line, flags=re.IGNORECASE)
             cleaned_lines.append(line)
+        return cleaned_lines
 
+    def _is_operational_brief_line(self, line: str) -> bool:
+        normalized = normalize_search_text(line)
+        if any(marker in normalized for marker in BRIEF_META_MARKERS):
+            return True
+        return normalized.startswith(BRIEF_INSTRUCTION_ONLY_PREFIXES)
+
+    def _clean_brief_candidate(self, line: str) -> str:
+        candidate = SILENT_BRIEF_PATTERN.sub(" ", str(line or ""))
+        candidate = re.sub(
+            rf"^(?:please\s+)?(?:{'|'.join(BRIEF_COMMAND_PREFIXES)})\s+",
+            "",
+            candidate,
+            flags=re.IGNORECASE,
+        )
+        for _ in range(2):
+            candidate = re.sub(r"^(?:a|an|the|un|una)\s+", "", candidate, flags=re.IGNORECASE)
+            candidate = re.sub(rf"^(?:{BRIEF_MEDIA_PATTERN})\s+", "", candidate, flags=re.IGNORECASE)
+            candidate = re.sub(
+                rf"^(?:a|an|the|un|una)\s+(?:{BRIEF_MEDIA_PATTERN})\s+",
+                "",
+                candidate,
+                flags=re.IGNORECASE,
+            )
+        candidate = re.sub(r"^(?:sobre|about|of|de)\s+", "", candidate, flags=re.IGNORECASE)
+        split_candidate = re.split(r"\b(?:sobre|about|of)\b", candidate, maxsplit=1, flags=re.IGNORECASE)
+        if len(split_candidate) == 2:
+            left_tokens = normalize_search_text(split_candidate[0]).split()
+            if not left_tokens or all(token in BRIEF_STYLE_FILLER_TOKENS for token in left_tokens):
+                candidate = split_candidate[1]
+        candidate = re.sub(r"\s+", " ", candidate).strip(" .,:;!-")
+        return candidate[:120]
+
+    def _brief_focus(self, topic: str) -> str:
+        cleaned_lines = self._brief_lines(topic)
         if not cleaned_lines:
             return "your idea"
 
-        instruction_prefixes = (
-            "generate ",
-            "create ",
-            "make ",
-            "write ",
-            "turn ",
-            "use ",
-            "include ",
-            "ensure ",
-            "do not ",
-            "change ",
-            "vary ",
-        )
+        fallback_candidates: list[str] = []
         for line in cleaned_lines:
-            lowered = line.casefold()
-            if lowered.startswith(instruction_prefixes):
+            candidate = self._clean_brief_candidate(line)
+            if candidate:
+                fallback_candidates.append(candidate)
+            if self._is_operational_brief_line(line):
                 continue
-            return line[:120]
-        return cleaned_lines[0][:120]
+            if candidate:
+                return candidate
+        return fallback_candidates[0] if fallback_candidates else cleaned_lines[0][:120]
 
     def _extract_brief_options(self, topic: str, *markers: str) -> list[str]:
         for raw_line in str(topic or "").splitlines():
@@ -83,16 +174,16 @@ class SceneGeneratorService:
         return random.SystemRandom().choice(options)
 
     def _theme_seed(self, topic_focus: str) -> str:
-        text = topic_focus.casefold()
+        text = normalize_search_text(topic_focus)
         theme_map = {
             ("nature", "naturaleza", "forest", "selva"): "a vast bioluminescent rainforest with towering waterfalls and drifting mist",
-            ("technology", "tecnología", "tech", "ai", "robot"): "a futuristic AI metropolis filled with holograms, robotics, and glowing data architecture",
+            ("technology", "tecnologia", "tech", "ai", "ia", "robot"): "a futuristic AI metropolis filled with holograms, robotics, and glowing data architecture",
             ("food", "comida", "cocina", "kitchen"): "a hyper-detailed gourmet world with sizzling street food, vapor, and cinematic close-ups",
             ("travel", "viaje", "turismo"): "an epic travel montage across neon cities, mountain roads, and impossible skylines",
             ("sports", "deportes", "sport"): "an intense sports arena with explosive motion, sweat, speed, and dramatic lighting",
-            ("fantasy", "fantasía", "magic"): "a mythical fantasy kingdom with colossal ruins, magical energy, and heroic scale",
-            ("science fiction", "sci-fi", "ciencia ficción"): "a science-fiction universe with spacecraft, alien megastructures, and impossible cosmic vistas",
-            ("historical", "history", "histórico"): "a cinematic historical world with monumental architecture, dense atmosphere, and period detail",
+            ("fantasy", "fantasia", "magic", "magia"): "a mythical fantasy kingdom with colossal ruins, magical energy, and heroic scale",
+            ("science fiction", "sci-fi", "ciencia ficcion"): "a science-fiction universe with spacecraft, alien megastructures, and impossible cosmic vistas",
+            ("historical", "history", "historico"): "a cinematic historical world with monumental architecture, dense atmosphere, and period detail",
             ("abstract", "arte abstracto", "abstract art"): "an abstract dreamscape of impossible geometry, liquid color, and surreal motion",
         }
         for keys, hint in theme_map.items():
@@ -105,22 +196,32 @@ class SceneGeneratorService:
         if normalized.startswith("es"):
             return {
                 "title_prefix": "Video sobre",
-                "summary_prefix": "Resumen automatizado sobre",
+                "summary_template": "Video corto cinematografico sobre {topic}, con un enfoque visual premium y ritmo {tone_lower}.",
                 "script": "Introduccion, desarrollo y cierre con llamado a la accion.",
                 "structure": "Hook / desarrollo / cierre",
                 "scene_titles": ["Gancho", "Contexto", "Desarrollo", "Detalle", "Cierre", "CTA"],
-                "description_prefix": "Escena",
-                "narration_prefix": "En esta escena",
+                "description_template": (
+                    "Escena {scene_number}: {scene_title_lower} de {topic}, con escala cinematografica y atmosfera impactante. "
+                    "Mantén un tono {tone_lower} y un enfoque para {audience_lower}."
+                ),
+                "narration_template": (
+                    "En esta escena {scene_number}, desarrolla {topic} con claridad y ritmo para un {video_format}."
+                ),
                 "transition": "Corte suave",
             }
         return {
             "title_prefix": "Video about",
-            "summary_prefix": "Automatic summary about",
+            "summary_template": "Cinematic short about {topic}, with premium visual direction and a {tone_lower} pace.",
             "script": "Introduction, development, and closing with a call to action.",
             "structure": "Hook / development / close",
             "scene_titles": ["Hook", "Context", "Development", "Detail", "Close", "CTA"],
-            "description_prefix": "Scene",
-            "narration_prefix": "In this scene",
+            "description_template": (
+                "Scene {scene_number}: {scene_title_lower} for {topic}, featuring {theme_seed}. "
+                "Keep the tone {tone_lower} and shape it for {audience_lower}."
+            ),
+            "narration_template": (
+                "In scene {scene_number}, develop {topic} clearly and dynamically for a {video_format}."
+            ),
             "transition": "Smooth cut",
         }
 
@@ -241,16 +342,28 @@ class SceneGeneratorService:
 
         for index in range(request.scene_count):
             title = str(scene_titles[min(index, len(scene_titles) - 1)])
-            description = (
-                f"{pack['description_prefix']} {index + 1} focused on {short_topic}, featuring {theme_seed}. "
-                f"Keep the tone {request.narrative_tone.lower()} and adapt it for {request.audience.lower()}."
+            description = str(pack["description_template"]).format(
+                scene_number=index + 1,
+                scene_title=title,
+                scene_title_lower=title.lower(),
+                topic=short_topic,
+                theme_seed=theme_seed,
+                tone_lower=request.narrative_tone.lower(),
+                audience_lower=request.audience.lower(),
+                video_format=request.video_format,
             )
             direction = self._fallback_scene_direction(fallback_request, index)
             narration = ""
             if not silent_narration:
-                narration = (
-                    f"{pack['narration_prefix']} {index + 1}, present a clear part of {short_topic} "
-                    f"for a {request.video_format} in {request.output_language}."
+                narration = str(pack["narration_template"]).format(
+                    scene_number=index + 1,
+                    scene_title=title,
+                    scene_title_lower=title.lower(),
+                    topic=short_topic,
+                    theme_seed=theme_seed,
+                    tone_lower=request.narrative_tone.lower(),
+                    audience_lower=request.audience.lower(),
+                    video_format=request.video_format,
                 )
             visual_prompt = (
                 f"{effective_visual_style}, {request.video_format}, scene {index + 1}, {short_topic}, {theme_seed}, "
@@ -284,7 +397,13 @@ class SceneGeneratorService:
 
         payload = {
             "title": f"{pack['title_prefix']} {short_topic[:60]}",
-            "summary": f"{pack['summary_prefix']} {short_topic}.",
+            "summary": str(pack["summary_template"]).format(
+                topic=short_topic,
+                theme_seed=theme_seed,
+                tone_lower=request.narrative_tone.lower(),
+                audience_lower=request.audience.lower(),
+                video_format=request.video_format,
+            ),
             "general_script": str(pack["script"]),
             "structure": str(pack["structure"]),
             "scenes": scenes,

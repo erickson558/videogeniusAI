@@ -2,7 +2,7 @@
 
 ## VideoGeniusAI
 
-Version actual: `V0.1.2`
+Version actual: `V0.1.3`
 
 VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para escribir el proyecto de video y puede producir el MP4 final de tres formas:
 
@@ -109,7 +109,7 @@ Existen tres modos:
 
 ### Flujo mas simple
 
-1. Escribe el prompt en `Project brief`.
+1. Escribe un brief creativo en `Project brief`, por ejemplo `Un short cinematografico sobre astronautas perdidos en Marte`.
 2. En `Quick setup` elige:
    - estilo visual
    - tono
@@ -185,7 +185,7 @@ Recomendacion:
    - `Escenas`
    - `JSON`
 
-## 4. Como generar video sin usar HeyGen
+## 4. Como generar video local desde un prompt
 
 ### Opcion A: Storyboard local
 

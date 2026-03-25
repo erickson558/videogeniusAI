@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.1.3 - 2026-03-24
+
+- Fixed fallback brief parsing so Spanish and English prompts generate videos around the requested theme instead of literal command phrases.
+- Localized Spanish fallback copy and preserved silent briefs without narration in local fallback generation.
+- Rewrote normalized config files on load so the persisted app version stays aligned with the running release.
+
 ## V0.1.2 - 2026-03-24
 
 - Fixed silent-video briefs so narration is removed from generated scenes and TTS is disabled automatically for non-avatar renders.
