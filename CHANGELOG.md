@@ -1,5 +1,9 @@
 # Changelog
 
+## V0.1.6 - 2026-03-24
+
+- Harden startup import bootstrap against stale Python bytecode caches.
+
 ## V0.1.5 - 2026-03-24
 
 - Disabled burned captions automatically for silent briefs and prevented render services from falling back to scene descriptions as subtitle text.
