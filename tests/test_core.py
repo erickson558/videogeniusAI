@@ -478,6 +478,25 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(persisted["app_version"], DISPLAY_VERSION)
             self.assertEqual(persisted["window_geometry"], "1460x900+80+40")
 
+    def test_config_load_ignores_unknown_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "ui_language": "es",
+                        "output_dir": str(Path(temp_dir) / "output"),
+                        "unexpected_key": "legacy-value",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = ConfigManager(config_path=config_path)
+            self.assertEqual(manager.config.ui_language, "es")
+            self.assertFalse(hasattr(manager.config, "unexpected_key"))
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertNotIn("unexpected_key", persisted)
+
 
 class InternationalizationTests(unittest.TestCase):
     def test_translation_manager_loads_expected_language(self) -> None:

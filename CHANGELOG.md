@@ -1,5 +1,10 @@
 # Changelog
 
+## V0.1.4 - 2026-03-24
+
+- Fixed startup config loading so the app ignores unexpected or legacy JSON keys instead of crashing during AppConfig initialization.
+- Added regression coverage for resilient config loading across mixed-version config files.
+
 ## V0.1.3 - 2026-03-24
 
 - Fixed fallback brief parsing so Spanish and English prompts generate videos around the requested theme instead of literal command phrases.

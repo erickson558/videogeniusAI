@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 import threading
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -111,13 +111,20 @@ class ConfigManager:
             self._write(config)
             return config
 
-        payload = asdict(AppConfig())
         persisted = raw if isinstance(raw, dict) else {}
-        payload.update(persisted)
+        config = AppConfig()
+        valid_fields = {field.name for field in fields(AppConfig)}
+        for key, value in persisted.items():
+            if key in valid_fields:
+                setattr(config, key, value)
+
+        payload = asdict(config)
         payload["app_version"] = DISPLAY_VERSION
         payload["ui_language"] = normalize_ui_language(str(payload.get("ui_language", DEFAULT_UI_LANGUAGE)))
         payload["window_geometry"] = sanitize_window_geometry(str(payload.get("window_geometry", DEFAULT_WINDOW_GEOMETRY)))
-        config = AppConfig(**payload)
+        for key, value in payload.items():
+            if key in valid_fields:
+                setattr(config, key, value)
         if persisted != asdict(config):
             self._write(config)
         return config
