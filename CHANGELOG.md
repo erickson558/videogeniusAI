@@ -1,5 +1,10 @@
 # Changelog
 
+## V0.1.5 - 2026-03-24
+
+- Disabled burned captions automatically for silent briefs and prevented render services from falling back to scene descriptions as subtitle text.
+- Updated silent-brief status messaging and added regression coverage for caption-free silent renders in storyboard and Local AI pipelines.
+
 ## V0.1.4 - 2026-03-24
 
 - Fixed startup config loading so the app ignores unexpected or legacy JSON keys instead of crashing during AppConfig initialization.

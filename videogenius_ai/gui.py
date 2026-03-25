@@ -1398,8 +1398,14 @@ class VideoGeniusApp(ctk.CTk):
             return False
         if not self._project_requests_silent_narration(project):
             return False
+        changed = False
         if self.tts_backend_var.get().strip() != "Sin voz":
             self.tts_backend_var.set("Sin voz")
+            changed = True
+        if bool(self.render_captions_var.get()):
+            self.render_captions_var.set(False)
+            changed = True
+        if changed:
             self._schedule_save()
         self._set_status(self.t("status.silent_brief_forcing_no_voice"), success=True)
         return True
@@ -1462,15 +1468,17 @@ class VideoGeniusApp(ctk.CTk):
     def _build_video_render_request_for_project(self, project: VideoProject, settings: dict[str, Any] | None = None) -> VideoRenderRequest:
         options = settings or self._capture_video_render_settings()
         effective_tts_backend = options["tts_backend"]
+        effective_render_captions = options["render_captions"]
         if self._project_requests_silent_narration(project) and options["provider"] != "Local Avatar video":
             effective_tts_backend = "Sin voz"
+            effective_render_captions = False
         return VideoRenderRequest(
             project=project,
             output_dir=options["output_dir"],
             provider=options["provider"],
             aspect_ratio=options["aspect_ratio"],
             request_timeout_seconds=options["request_timeout_seconds"],
-            render_captions=options["render_captions"],
+            render_captions=effective_render_captions,
             comfyui_base_url=options["comfyui_base_url"],
             comfyui_worker_urls=options["comfyui_worker_urls"],
             parallel_scene_workers=options["parallel_scene_workers"],

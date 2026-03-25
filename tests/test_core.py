@@ -17,6 +17,7 @@ from videogenius_ai.export_service import ExportService
 from videogenius_ai.generator_service import SceneGeneratorService
 from videogenius_ai.gpu_detector import GPUDetector
 from videogenius_ai.i18n import TranslationManager, normalize_ui_language
+from videogenius_ai.local_ai_video_service import LocalAIVideoService
 from videogenius_ai.lmstudio_client import sort_models_for_generation
 from videogenius_ai.logging_utils import configure_logging
 from videogenius_ai.prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
@@ -32,7 +33,7 @@ from videogenius_ai.render_devices import (
 )
 from videogenius_ai.setup_manager import SetupManager
 from videogenius_ai.version import DISPLAY_VERSION
-from videogenius_ai.models import GenerationRequest, RenderedVideoResult, VideoProject
+from videogenius_ai.models import GenerationRequest, RenderedVideoResult, VideoProject, VideoRenderRequest
 from videogenius_ai.video_render_service import VideoRenderService
 from videogenius_ai.video_renderer import VideoRenderer
 from videogenius_ai.video_service import StoryboardVideoService
@@ -742,6 +743,38 @@ class LocalVideoSupportTests(unittest.TestCase):
             raw_response="{}",
         )
 
+    def _make_silent_project(self):
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic="Curiosidades del espacio sin narracion",
+            visual_style="Cinematic",
+            audience="General",
+            narrative_tone="Fast-paced",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=30,
+            scene_count=3,
+            generation_mode="Proyecto completo",
+            model="model",
+            temperature=0.7,
+            max_tokens=900,
+        )
+        return service.normalize_project(
+            {
+                "title": "Planetas raros",
+                "summary": "Datos breves y llamativos",
+                "general_script": "Hook, facts, close",
+                "structure": "Hook / middle / payoff",
+                "scenes": [
+                    {"scene_number": 1, "scene_title": "Hook", "description": "Apertura visual", "visual_prompt": "Planeta gigante", "narration": "No debe quedar", "duration_seconds": 10},
+                    {"scene_number": 2, "scene_title": "Fact 1", "description": "Hecho uno", "visual_prompt": "Júpiter y anillos", "narration": "No debe quedar", "duration_seconds": 10},
+                    {"scene_number": 3, "scene_title": "Close", "description": "Cierre", "visual_prompt": "Galaxia brillante", "narration": "No debe quedar", "duration_seconds": 10},
+                ],
+            },
+            request,
+            raw_response="{}",
+        )
+
     def test_video_render_service_normalizes_unknown_provider(self) -> None:
         renderer = VideoRenderService(local_ai_service=None)
         request = self._make_project()
@@ -853,6 +886,32 @@ class LocalVideoSupportTests(unittest.TestCase):
         self.assertIn("vertical 9:16 cinematic composition", prompt)
         self.assertIn("no text overlay", prompt)
         self.assertIn("Planeta gigante", prompt)
+
+    def test_storyboard_caption_is_empty_for_silent_brief(self) -> None:
+        service = StoryboardVideoService()
+        project = self._make_silent_project()
+        caption = service._scene_caption(project, 0)  # type: ignore[attr-defined]
+        self.assertEqual(caption, "")
+
+    def test_local_ai_caption_and_audio_are_empty_for_silent_brief(self) -> None:
+        with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
+            renderer = mock.Mock()
+            renderer.ffmpeg.ffmpeg_path = "C:/ffmpeg.exe"
+            renderer.ffmpeg.ffprobe_path = "C:/ffprobe.exe"
+            renderer_cls.return_value = renderer
+            service = LocalAIVideoService()
+
+        project = self._make_silent_project()
+        request = VideoRenderRequest(
+            project=project,
+            output_dir="D:/tmp/out",
+            provider="Local AI video",
+            render_captions=True,
+            tts_backend="Windows local",
+        )
+        self.assertEqual(service._scene_caption(request, 0), "")  # type: ignore[attr-defined]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.assertIsNone(service._scene_audio(request, 0, Path(temp_dir)))  # type: ignore[attr-defined]
 
     def test_cinematic_prompt_and_negative_prompt_include_directional_details(self) -> None:
         project = self._make_project()

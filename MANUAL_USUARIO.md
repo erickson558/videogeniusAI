@@ -2,7 +2,7 @@
 
 ## VideoGeniusAI
 
-Version actual: `V0.1.4`
+Version actual: `V0.1.5`
 
 VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para escribir el proyecto de video y puede producir el MP4 final de tres formas:
 

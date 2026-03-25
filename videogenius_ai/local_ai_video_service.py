@@ -12,7 +12,7 @@ from .models import GeneratedSceneAsset, RenderedVideoResult, VideoRenderRequest
 from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
 from .render_devices import VideoEncoderPlan
 from .tts_service import PiperTTSService, WindowsTTSService
-from .utils import now_stamp, sanitize_filename
+from .utils import brief_requests_silent_narration, now_stamp, sanitize_filename
 from .video_renderer import VideoRenderer
 
 CREATE_NO_WINDOW = 0x08000000
@@ -88,6 +88,8 @@ class LocalAIVideoService:
         )
 
     def _scene_caption(self, request: VideoRenderRequest, scene_index: int) -> str:
+        if brief_requests_silent_narration(request.project.source_topic):
+            return ""
         scene = request.project.scenes[scene_index]
         return (scene.narration or scene.description or scene.scene_title or "").strip()
 
@@ -97,6 +99,8 @@ class LocalAIVideoService:
         scene_index: int,
         assets_dir: Path,
     ) -> Path | None:
+        if brief_requests_silent_narration(request.project.source_topic):
+            return None
         scene = request.project.scenes[scene_index]
         narration = (scene.narration or scene.description or "").strip()
         if not narration:

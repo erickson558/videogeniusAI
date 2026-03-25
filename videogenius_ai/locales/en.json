@@ -263,7 +263,7 @@
     "storyboard_auto_fallback_selected": "ComfyUI was not ready. Storyboard local was selected automatically.",
     "storyboard_environment_prepared": "Environment prepared automatically for storyboard shorts.",
     "storyboard_local_fallback": "ComfyUI was not ready. Storyboard local will continue with local fallback visuals.",
-    "silent_brief_forcing_no_voice": "The brief requests a video without narration. Voice generation was disabled automatically.",
+    "silent_brief_forcing_no_voice": "The brief requests a video without narration. Voice generation and burned captions were disabled automatically.",
     "setup_completed": "Automatic setup completed.",
     "setup_summary_initial": "Inspecting environment...",
     "testing_connection": "LM Studio: not tested",

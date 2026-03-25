@@ -14,7 +14,7 @@ from .models import RenderedVideoResult, SceneShot, VideoProject, VideoRenderReq
 from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt, summarize_scene_shots
 from .render_devices import VideoEncoderPlan
 from .tts_service import PiperTTSService, WindowsTTSService
-from .utils import now_stamp, sanitize_filename
+from .utils import brief_requests_silent_narration, now_stamp, sanitize_filename
 from .video_renderer import VideoRenderer
 
 CREATE_NO_WINDOW = 0x08000000
@@ -116,6 +116,8 @@ class StoryboardVideoService:
         return shots
 
     def _scene_caption(self, project: VideoProject, scene_index: int) -> str:
+        if brief_requests_silent_narration(project.source_topic):
+            return ""
         scene = project.scenes[scene_index]
         return (scene.narration or scene.description or scene.scene_title or project.title).strip()
 
