@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
 concurrency:
   group: release-main
@@ -15,6 +16,8 @@ permissions:
 jobs:
   build-and-release:
     runs-on: windows-latest
+    env:
+      PYTHONUTF8: "1"
 
     steps:
       - name: Checkout repository
@@ -76,7 +79,30 @@ jobs:
 
       - name: Build executable
         shell: pwsh
-        run: powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
+        run: .\build_exe.ps1
+
+      - name: Verify executable output
+        shell: pwsh
+        run: |
+          if (-not (Test-Path .\videogeniusAI.exe)) {
+            throw "videogeniusAI.exe was not created."
+          }
+
+      - name: Generate release checksum
+        shell: pwsh
+        run: |
+          $checksum = (Get-FileHash .\videogeniusAI.exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$checksum *videogeniusAI.exe" | Set-Content .\videogeniusAI.exe.sha256 -Encoding ascii
+
+      - name: Upload workflow artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: videogeniusAI-${{ steps.version.outputs.release_tag }}
+          path: |
+            videogeniusAI.exe
+            videogeniusAI.exe.sha256
+            LICENSE
+            NOTICE
 
       - name: Create version tag if missing
         shell: pwsh
@@ -94,7 +120,9 @@ jobs:
           tag_name: ${{ steps.version.outputs.release_tag }}
           name: VideoGeniusAI ${{ steps.version.outputs.release_tag }}
           generate_release_notes: true
+          overwrite_files: true
           files: |
             videogeniusAI.exe
+            videogeniusAI.exe.sha256
             LICENSE
             NOTICE

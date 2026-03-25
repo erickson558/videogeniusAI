@@ -1,6 +1,6 @@
 # VideoGeniusAI
 
-Current app version: `V0.1.6`
+Current app version: `V0.1.7`
 
 VideoGeniusAI is a Windows desktop application built in Python that turns a prompt into a structured short-form video project and can render the final MP4 locally.
 
@@ -62,6 +62,11 @@ Build dependencies are pinned in `requirements-dev.txt`:
 
 - everything from `requirements.txt`
 - `PyInstaller`
+
+Requirements files:
+
+- `requirements.txt` for runtime installs
+- `requirements-dev.txt` for local build, test, and release automation
 
 ## Installation
 
@@ -136,6 +141,12 @@ python -m unittest discover -s tests -v
 Build the Windows executable:
 
 ```powershell
+.\build_exe.ps1
+```
+
+If your local PowerShell execution policy blocks scripts, use:
+
+```powershell
 powershell -ExecutionPolicy Bypass -File .\build_exe.ps1
 ```
 
@@ -144,7 +155,9 @@ The build script:
 - reads the version from `videogenius_ai/version.py`
 - writes the `.exe` into the project root next to `videogeniusAI.pyw`
 - uses `videogeniusai.ico` from the project root
+- disables the console window because the app is GUI-only
 - embeds matching Windows executable version metadata
+- fails the build if `videogeniusAI.exe` is not produced
 
 ## Release discipline
 
@@ -176,10 +189,13 @@ This updates:
 GitHub Actions workflow:
 
 - runs on every push to `main`
+- can also be triggered manually with `workflow_dispatch`
 - installs development dependencies
 - executes the test suite
 - rebuilds `videogeniusAI.exe`
 - ensures the matching `Vx.y.z` tag exists
+- generates a SHA-256 checksum for the executable
+- uploads the executable, checksum, `LICENSE`, and `NOTICE` as workflow artifacts
 - publishes a GitHub Release with the compiled executable plus Apache 2.0 license files
 
 ## Project structure

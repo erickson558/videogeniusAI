@@ -1,5 +1,9 @@
 # Changelog
 
+## V0.1.7 - 2026-03-24
+
+- Refreshed the Windows build packaging and aligned the automatic release workflow with executable artifacts.
+
 ## V0.1.6 - 2026-03-24
 
 - Harden startup import bootstrap against stale Python bytecode caches.

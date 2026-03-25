@@ -38,6 +38,7 @@ $versionInfoPath = Join-Path $env:TEMP "videogeniusAI_version_info.txt"
 $safeVersion = $appVersion -replace '[^0-9\.]', '_'
 $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
 $workPath = Join-Path $env:TEMP "videogeniusAI_build_${safeVersion}_$timestamp"
+$exeOutputPath = Join-Path $projectRoot "videogeniusAI.exe"
 $versionInfo = @"
 VSVersionInfo(
   ffi=FixedFileInfo(
@@ -73,22 +74,30 @@ VSVersionInfo(
 )
 "@
 Set-Content -Path $versionInfoPath -Value $versionInfo -Encoding UTF8
+$buildArgs = @(
+    "-m", "PyInstaller",
+    "--noconfirm",
+    "--clean",
+    "--onefile",
+    "--windowed",
+    "--name", "videogeniusAI",
+    "--icon", $iconPath,
+    "--add-data", "$localesPath;videogenius_ai\locales",
+    "--version-file", $versionInfoPath,
+    "--distpath", $projectRoot,
+    "--workpath", $workPath,
+    "--specpath", $projectRoot,
+    $entryPoint
+)
 
 Push-Location $projectRoot
 try {
-    & $pythonExe -m PyInstaller `
-        --noconfirm `
-        --clean `
-        --onefile `
-        --windowed `
-        --name "videogeniusAI" `
-        --icon $iconPath `
-        --add-data "$localesPath;videogenius_ai\locales" `
-        --version-file $versionInfoPath `
-        --distpath $projectRoot `
-        --workpath $workPath `
-        --specpath $projectRoot `
-        $entryPoint
+    & $pythonExe @buildArgs
+    if (-not (Test-Path $exeOutputPath)) {
+        throw "Expected executable was not created: $exeOutputPath"
+    }
+    Write-Host "Built executable: $exeOutputPath"
+    Write-Host "Executable version: V$appVersion"
 }
 finally {
     Pop-Location
