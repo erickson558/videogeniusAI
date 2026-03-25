@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import random
 import re
@@ -56,6 +57,29 @@ BRIEF_COMMAND_PREFIXES = (
     "escribe",
     "produce",
 )
+BRIEF_ROLEPLAY_PREFIXES = (
+    "act as",
+    "actua como",
+    "actúa como",
+    "you are",
+    "eres",
+)
+BRIEF_TASK_PREFIXES = (
+    "your task is",
+    "tu tarea es",
+)
+BRIEF_SECTION_PREFIXES = (
+    "intro",
+    "outro",
+    "curiosidad",
+    "curiosity",
+    "estructura del video",
+    "video structure",
+    "requerimientos de produccion",
+    "production requirements",
+    "reglas",
+    "rules",
+)
 BRIEF_MEDIA_PATTERN = r"(?:youtube\s+shorts?|short-form\s+video|shorts?|reels?|clips?|cortos?|v[ií]deos?|videos?)"
 BRIEF_STYLE_FILLER_TOKENS = {
     "cinematic",
@@ -86,6 +110,11 @@ class SceneGeneratorService:
     def __init__(self) -> None:
         self.logger = LOGGER
 
+    def _plain_brief_text(self, text: str) -> str:
+        plain = re.sub(r"[*`#_]+", " ", str(text or ""))
+        plain = re.sub(r"\s+", " ", plain)
+        return plain.strip()
+
     def _brief_lines(self, topic: str) -> list[str]:
         cleaned_lines: list[str] = []
         for raw_line in str(topic or "").splitlines():
@@ -93,17 +122,38 @@ class SceneGeneratorService:
             if not line:
                 continue
             line = re.sub(r"^(topic|tema)\s*:\s*", "", line, flags=re.IGNORECASE)
-            cleaned_lines.append(line)
+            cleaned_lines.append(self._plain_brief_text(line))
         return cleaned_lines
 
     def _is_operational_brief_line(self, line: str) -> bool:
         normalized = normalize_search_text(line)
         if any(marker in normalized for marker in BRIEF_META_MARKERS):
             return True
+        if normalized.startswith(BRIEF_ROLEPLAY_PREFIXES):
+            return True
+        if normalized.startswith(BRIEF_TASK_PREFIXES):
+            return True
+        if normalized.startswith(BRIEF_SECTION_PREFIXES):
+            return True
         return normalized.startswith(BRIEF_INSTRUCTION_ONLY_PREFIXES)
 
+    def _extract_structured_topic(self, line: str) -> str:
+        candidate = self._plain_brief_text(line)
+        patterns = [
+            r"\b(?:con|with)\s+(\d+\s+(?:curiosidades?|facts?)\s+[^\.;:]+)",
+            r"\b(?:tema|theme)\s*:\s*([^\.;:]+)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, candidate, flags=re.IGNORECASE)
+            if not match:
+                continue
+            extracted = re.sub(r"\s+", " ", match.group(1)).strip(" .,:;!-")
+            if extracted:
+                return extracted[:120]
+        return ""
+
     def _clean_brief_candidate(self, line: str) -> str:
-        candidate = SILENT_BRIEF_PATTERN.sub(" ", str(line or ""))
+        candidate = SILENT_BRIEF_PATTERN.sub(" ", self._plain_brief_text(line))
         candidate = re.sub(
             rf"^(?:please\s+)?(?:{'|'.join(BRIEF_COMMAND_PREFIXES)})\s+",
             "",
@@ -135,14 +185,73 @@ class SceneGeneratorService:
 
         fallback_candidates: list[str] = []
         for line in cleaned_lines:
-            candidate = self._clean_brief_candidate(line)
-            if candidate:
+            structured_candidate = self._extract_structured_topic(line)
+            candidate = structured_candidate or self._clean_brief_candidate(line)
+            if structured_candidate:
+                fallback_candidates.append(structured_candidate)
+            elif candidate:
                 fallback_candidates.append(candidate)
             if self._is_operational_brief_line(line):
+                if structured_candidate:
+                    return structured_candidate
                 continue
             if candidate:
                 return candidate
         return fallback_candidates[0] if fallback_candidates else cleaned_lines[0][:120]
+
+    def _brief_scene_titles(self, topic: str) -> list[str]:
+        normalized = normalize_search_text(self._plain_brief_text(topic))
+        titles: list[str] = []
+        if "intro" in normalized:
+            titles.append("Intro")
+        curiosity_numbers = sorted(
+            {int(match) for match in re.findall(r"\bcuriosidad\s+(\d+)\b|\bcuriosity\s+(\d+)\b", normalized) for match in match if match}
+        )
+        if curiosity_numbers:
+            label = "Curiosidad" if "curiosidad" in normalized else "Curiosity"
+            titles.extend(f"{label} {number}" for number in curiosity_numbers)
+        if "outro" in normalized:
+            titles.append("Outro")
+        return titles
+
+    def _infer_total_duration_seconds(self, topic: str) -> int | None:
+        plain = self._plain_brief_text(topic)
+        match = re.search(r"\b(\d{1,3})\s*(?:segundos?|seconds?)\b", plain, flags=re.IGNORECASE)
+        if not match:
+            return None
+        value = safe_int(match.group(1), 0)
+        return value if value > 0 else None
+
+    def _infer_scene_count(self, topic: str) -> int | None:
+        explicit_titles = self._brief_scene_titles(topic)
+        if explicit_titles:
+            return len(explicit_titles)
+
+        normalized = normalize_search_text(self._plain_brief_text(topic))
+        match = re.search(r"\b(\d{1,2})\s+curiosidades?\b|\b(\d{1,2})\s+facts?\b", normalized)
+        if not match:
+            return None
+        value = safe_int(next(group for group in match.groups() if group), 0)
+        if value <= 0:
+            return None
+        if "intro" in normalized:
+            value += 1
+        if "outro" in normalized:
+            value += 1
+        return value
+
+    def _request_with_brief_overrides(self, request: GenerationRequest) -> GenerationRequest:
+        inferred_duration = self._infer_total_duration_seconds(request.topic)
+        inferred_scene_count = self._infer_scene_count(request.topic)
+        next_duration = inferred_duration or request.total_duration_seconds
+        next_scene_count = inferred_scene_count or request.scene_count
+        if next_duration == request.total_duration_seconds and next_scene_count == request.scene_count:
+            return request
+        return replace(
+            request,
+            total_duration_seconds=next_duration,
+            scene_count=next_scene_count,
+        )
 
     def _extract_brief_options(self, topic: str, *markers: str) -> list[str]:
         for raw_line in str(topic or "").splitlines():
@@ -277,7 +386,7 @@ class SceneGeneratorService:
         shot_count = 2 if scene_duration <= 4 else 3 if scene_duration <= 10 else 4
         base_duration = max(0.8, scene_duration / max(1, shot_count))
         shots: list[dict[str, Any]] = []
-        topic_excerpt = request.topic.strip().replace("\n", " ")[:140]
+        topic_excerpt = self._brief_focus(request.topic).replace("\n", " ")[:140]
         for shot_index in range(shot_count):
             shot_type, camera_angle, camera_motion = shot_templates[(scene_index + shot_index) % len(shot_templates)]
             shots.append(
@@ -302,8 +411,9 @@ class SceneGeneratorService:
         return shots
 
     def generate_fallback_project(self, request: GenerationRequest) -> VideoProject:
+        request = self._request_with_brief_overrides(request)
         pack = self._fallback_language_pack(request.output_language)
-        scene_titles = pack["scene_titles"]
+        scene_titles = self._brief_scene_titles(request.topic) or pack["scene_titles"]
         assert isinstance(scene_titles, list)
         silent_narration = brief_requests_silent_narration(request.topic)
 
@@ -413,6 +523,7 @@ class SceneGeneratorService:
         return project
 
     def build_messages(self, request: GenerationRequest, previous_response: str = "") -> list[dict[str, str]]:
+        request = self._request_with_brief_overrides(request)
         schema = {
             "title": "string",
             "summary": "string",
@@ -480,6 +591,7 @@ class SceneGeneratorService:
 
         topic_focus = self._brief_focus(request.topic)
         silent_narration = brief_requests_silent_narration(request.topic)
+        structured_scene_titles = self._brief_scene_titles(request.topic)
         user_message = (
             "Create a video project in JSON for the following request.\n"
             f"Primary theme to develop: {topic_focus}\n"
@@ -510,6 +622,11 @@ class SceneGeneratorService:
             user_message += "\n- The brief explicitly requests no narration. Set narration to an empty string for every scene.\n"
         else:
             user_message += "\n- Make narration ready to read aloud.\n"
+        if structured_scene_titles:
+            user_message += (
+                "\n- The brief already defines an explicit multi-part outline. Preserve that outline scene by scene "
+                f"using this order: {', '.join(structured_scene_titles)}.\n"
+            )
 
         if previous_response:
             user_message += (
@@ -651,6 +768,7 @@ class SceneGeneratorService:
             scene.duration_seconds = duration
 
     def normalize_project(self, payload: dict[str, Any], request: GenerationRequest, raw_response: str) -> VideoProject:
+        request = self._request_with_brief_overrides(request)
         raw_scenes = payload.get("scenes")
         if not isinstance(raw_scenes, list) or not raw_scenes:
             raise ValueError("The JSON payload does not include a valid 'scenes' list.")
@@ -667,7 +785,7 @@ class SceneGeneratorService:
         self._rebalance_durations(scenes, request.total_duration_seconds)
 
         project = VideoProject(
-            title=str(payload.get("title") or payload.get("video_title") or request.topic[:80]),
+            title=str(payload.get("title") or payload.get("video_title") or self._brief_focus(request.topic)[:80]),
             summary=str(payload.get("summary") or payload.get("overview") or ""),
             general_script=str(payload.get("general_script") or payload.get("script") or ""),
             structure=str(payload.get("structure") or payload.get("video_structure") or ""),
@@ -769,13 +887,23 @@ class SceneGeneratorService:
         retry_attempts: int,
         progress_callback: ProgressCallback | None = None,
     ) -> VideoProject:
+        effective_request = self._request_with_brief_overrides(request)
+        if effective_request != request:
+            self.logger.info(
+                "Applied brief overrides | scene_count=%s->%s | duration_seconds=%s->%s | focus=%s",
+                request.scene_count,
+                effective_request.scene_count,
+                request.total_duration_seconds,
+                effective_request.total_duration_seconds,
+                self._brief_focus(request.topic),
+            )
         self.logger.info(
             "Starting LM Studio project generation | model=%s | scenes=%s | duration_seconds=%s | language=%s | mode=%s",
-            request.model or "<auto>",
-            request.scene_count,
-            request.total_duration_seconds,
-            request.output_language,
-            request.generation_mode,
+            effective_request.model or "<auto>",
+            effective_request.scene_count,
+            effective_request.total_duration_seconds,
+            effective_request.output_language,
+            effective_request.generation_mode,
         )
         if progress_callback:
             progress_callback(0.05, "Preparing generation prompt...")
@@ -792,10 +920,10 @@ class SceneGeneratorService:
                     )
 
                 raw_response = client.chat_completion(
-                    model=request.model,
-                    messages=self.build_messages(request, previous_response),
-                    temperature=request.temperature,
-                    max_tokens=request.max_tokens,
+                    model=effective_request.model,
+                    messages=self.build_messages(effective_request, previous_response),
+                    temperature=effective_request.temperature,
+                    max_tokens=effective_request.max_tokens,
                     expect_json=True,
                 )
 
@@ -803,7 +931,7 @@ class SceneGeneratorService:
                     progress_callback(0.75, "Parsing JSON response...")
 
                 payload = parse_json_payload(raw_response)
-                project = self.normalize_project(payload, request, raw_response)
+                project = self.normalize_project(payload, effective_request, raw_response)
                 self.logger.info(
                     "Project generation completed | title=%s | scenes=%s",
                     project.title,

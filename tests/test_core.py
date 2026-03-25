@@ -278,6 +278,73 @@ class GenerationNormalizationTests(unittest.TestCase):
         self.assertIn("escena 1", project.scenes[0].description.casefold())
         self.assertIn("en esta escena 1", project.scenes[0].narration.casefold())
 
+    def test_generate_fallback_project_extracts_structured_curiosity_brief(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic=(
+                "Actúa como un creador de contenido viral para YouTube Shorts.\n"
+                "Tu tarea es generar el guion completo para un video narrado de 55 segundos exactos, con 5 curiosidades informaticas.\n"
+                "INTRO (0-3s):\n"
+                "CURIOSIDAD 1 (4-13s):\n"
+                "CURIOSIDAD 2 (14-23s):\n"
+                "CURIOSIDAD 3 (24-33s):\n"
+                "CURIOSIDAD 4 (34-43s):\n"
+                "CURIOSIDAD 5 (44-53s):\n"
+                "OUTRO (54-55s):"
+            ),
+            visual_style="Cyberpunk",
+            audience="General",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=30,
+            scene_count=3,
+            generation_mode="Proyecto completo",
+            model="",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        project = service.generate_fallback_project(request)
+        self.assertEqual(project.estimated_total_duration_seconds, 55)
+        self.assertEqual(len(project.scenes), 7)
+        self.assertEqual(sum(scene.duration_seconds for scene in project.scenes), 55)
+        self.assertIn("5 curiosidades informaticas", normalize_search_text(project.title))
+        self.assertNotIn("actua como", normalize_search_text(project.title))
+        self.assertEqual(project.scenes[0].scene_title, "Intro")
+        self.assertEqual(project.scenes[-1].scene_title, "Outro")
+
+    def test_build_messages_preserves_structured_outline_when_brief_defines_it(self) -> None:
+        service = SceneGeneratorService()
+        request = GenerationRequest(
+            topic=(
+                "Actúa como un creador de contenido viral para YouTube Shorts.\n"
+                "Tu tarea es generar el guion completo para un video narrado de 55 segundos exactos, con 5 curiosidades informaticas.\n"
+                "INTRO (0-3s):\n"
+                "CURIOSIDAD 1 (4-13s):\n"
+                "CURIOSIDAD 2 (14-23s):\n"
+                "CURIOSIDAD 3 (24-33s):\n"
+                "CURIOSIDAD 4 (34-43s):\n"
+                "CURIOSIDAD 5 (44-53s):\n"
+                "OUTRO (54-55s):"
+            ),
+            visual_style="Cyberpunk",
+            audience="General",
+            narrative_tone="Epic",
+            video_format="YouTube Short",
+            output_language="Espanol",
+            total_duration_seconds=30,
+            scene_count=3,
+            generation_mode="Proyecto completo",
+            model="model",
+            temperature=0.7,
+            max_tokens=1000,
+        )
+        messages = service.build_messages(request)
+        self.assertIn("primary theme to develop: 5 curiosidades informaticas", normalize_search_text(messages[1]["content"]))
+        self.assertIn("Scene count: 7", messages[1]["content"])
+        self.assertIn("Total estimated duration in seconds: 55", messages[1]["content"])
+        self.assertIn("Intro, Curiosidad 1, Curiosidad 2, Curiosidad 3, Curiosidad 4, Curiosidad 5, Outro", messages[1]["content"])
+
     def test_normalize_project_preserves_shot_plan_and_direction_fields(self) -> None:
         service = SceneGeneratorService()
         request = GenerationRequest(

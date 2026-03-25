@@ -1,5 +1,9 @@
 # Changelog
 
+## V0.1.10 - 2026-03-25
+
+- Improved structured brief parsing so topic, scene count, and total duration are inferred from prompts like multi-curiosity YouTube Shorts scripts.
+
 ## V0.1.9 - 2026-03-25
 
 - Synced social video formats with the correct render aspect ratio and clarified storyboard vs real AI/avatar backends in the UI.
