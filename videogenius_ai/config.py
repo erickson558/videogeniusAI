@@ -14,9 +14,23 @@ from .version import DISPLAY_VERSION
 DEFAULT_WINDOW_GEOMETRY = "1460x900+80+40"
 MIN_WINDOW_WIDTH = 1320
 MIN_WINDOW_HEIGHT = 840
+_TRUE_TEXT = {"1", "true", "yes", "on", "si", "sí"}
+_FALSE_TEXT = {"0", "false", "no", "off"}
+_POSITIVE_INT_FIELDS = {
+    "parallel_scene_workers",
+    "comfyui_poll_interval_seconds",
+    "scene_count",
+    "estimated_duration_seconds",
+    "auto_close_seconds",
+    "history_limit",
+    "json_retry_attempts",
+    "request_timeout_seconds",
+    "max_tokens",
+}
 
 
 def sanitize_window_geometry(value: str, fallback: str = DEFAULT_WINDOW_GEOMETRY) -> str:
+    # Keep only sane persisted geometry values so the window always reopens on screen.
     text = (value or "").strip()
     match = re.fullmatch(r"(\d+)x(\d+)([+-]\d+)([+-]\d+)", text)
     if not match:
@@ -35,6 +49,7 @@ def sanitize_window_geometry(value: str, fallback: str = DEFAULT_WINDOW_GEOMETRY
 
 @dataclass
 class AppConfig:
+    # AppConfig is the persisted contract for UI defaults and runtime preferences.
     app_version: str = DISPLAY_VERSION
     ui_language: str = DEFAULT_UI_LANGUAGE
     appearance_mode: str = "dark"
@@ -82,6 +97,48 @@ class AppConfig:
     max_tokens: int = 2800
 
 
+def _coerce_config_value(field_name: str, value: Any, default: Any) -> Any:
+    # Normalize legacy or manually edited JSON values back into the expected scalar types.
+    if isinstance(default, bool):
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in _TRUE_TEXT:
+                return True
+            if normalized in _FALSE_TEXT:
+                return False
+        return default
+
+    if isinstance(default, int):
+        if isinstance(value, bool):
+            return default
+        try:
+            parsed = int(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+        if field_name in _POSITIVE_INT_FIELDS and parsed < 1:
+            return default
+        return parsed
+
+    if isinstance(default, float):
+        if isinstance(value, bool):
+            return default
+        try:
+            return float(str(value).strip())
+        except (TypeError, ValueError):
+            return default
+
+    if isinstance(default, str):
+        if value is None or isinstance(value, (dict, list)):
+            return default
+        return str(value)
+
+    return value
+
+
 class ConfigManager:
     def __init__(self, config_path: Path | None = None) -> None:
         self.config_path = config_path or CONFIG_PATH
@@ -90,6 +147,7 @@ class ConfigManager:
         self.ensure_runtime_directories()
 
     def ensure_runtime_directories(self) -> None:
+        # Create every runtime folder eagerly so later file operations can stay simple.
         HISTORY_DIR.mkdir(parents=True, exist_ok=True)
         OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         TEMP_DIR.mkdir(parents=True, exist_ok=True)
@@ -113,12 +171,11 @@ class ConfigManager:
 
         persisted = raw if isinstance(raw, dict) else {}
         config = AppConfig()
-        valid_fields = {field.name for field in fields(AppConfig)}
-        for key, value in persisted.items():
-            if key in valid_fields:
-                setattr(config, key, value)
-
         payload = asdict(config)
+        valid_fields = {field.name for field in fields(AppConfig)}
+        for key, default_value in tuple(payload.items()):
+            if key in persisted:
+                payload[key] = _coerce_config_value(key, persisted[key], default_value)
         payload["app_version"] = DISPLAY_VERSION
         payload["ui_language"] = normalize_ui_language(str(payload.get("ui_language", DEFAULT_UI_LANGUAGE)))
         payload["window_geometry"] = sanitize_window_geometry(str(payload.get("window_geometry", DEFAULT_WINDOW_GEOMETRY)))
@@ -130,6 +187,7 @@ class ConfigManager:
         return config
 
     def _write(self, config: AppConfig | None = None) -> None:
+        # Write through a temp file so config updates stay atomic on disk.
         data = asdict(config or self.config)
         data["app_version"] = DISPLAY_VERSION
         temp_path = self.config_path.with_suffix(".tmp")
@@ -152,6 +210,7 @@ class ConfigManager:
             self.ensure_runtime_directories()
 
     def resolve_output_dir(self) -> str:
+        # Resolve relative output paths against the config file location for portable installs.
         configured = Path(self.config.output_dir)
         if not configured.is_absolute():
             configured = self.config_path.parent / configured

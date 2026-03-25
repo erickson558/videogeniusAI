@@ -498,6 +498,35 @@ class ConfigTests(unittest.TestCase):
             persisted = json.loads(config_path.read_text(encoding="utf-8"))
             self.assertNotIn("unexpected_key", persisted)
 
+    def test_config_load_coerces_stringified_scalar_values(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.json"
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "render_captions": "false",
+                        "auto_close_enabled": "true",
+                        "parallel_scene_workers": "3",
+                        "temperature": "0.55",
+                        "history_limit": "25",
+                        "max_tokens": "invalid",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            manager = ConfigManager(config_path=config_path)
+            self.assertFalse(manager.config.render_captions)
+            self.assertTrue(manager.config.auto_close_enabled)
+            self.assertEqual(manager.config.parallel_scene_workers, 3)
+            self.assertAlmostEqual(manager.config.temperature, 0.55)
+            self.assertEqual(manager.config.history_limit, 25)
+            self.assertEqual(manager.config.max_tokens, 2800)
+            persisted = json.loads(config_path.read_text(encoding="utf-8"))
+            self.assertIs(persisted["render_captions"], False)
+            self.assertIs(persisted["auto_close_enabled"], True)
+            self.assertEqual(persisted["parallel_scene_workers"], 3)
+            self.assertEqual(persisted["history_limit"], 25)
+
 
 class InternationalizationTests(unittest.TestCase):
     def test_translation_manager_loads_expected_language(self) -> None:

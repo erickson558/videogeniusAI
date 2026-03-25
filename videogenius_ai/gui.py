@@ -34,10 +34,12 @@ from .utils import brief_requests_silent_narration
 from .version import APP_NAME, DISPLAY_VERSION
 from .video_render_service import VideoRenderService
 
+
 def ui_color(light: str, dark: str) -> tuple[str, str]:
     return (light, dark)
 
 
+# Central palette tokens keep the custom look consistent across the entire UI.
 THEME = {
     "app_bg": ui_color("#E6ECF4", "#050816"),
     "main_panel": ui_color("#F8FAFC", "#0B1120"),
@@ -65,12 +67,14 @@ THEME = {
     "progress_bg": ui_color("#1E293B", "#1E293B"),
 }
 
+# Default theme bootstrap happens before the root window is created.
 ctk.set_appearance_mode("dark")
 ctk.set_default_color_theme("blue")
 
 
 @dataclass
 class UIStateSnapshot:
+    # Background jobs use this snapshot to push a full UI refresh through the queue safely.
     topic_text: str = ""
     setup_summary: str = ""
     status_text: str = ""
@@ -85,6 +89,7 @@ class UIStateSnapshot:
 
 class HoverToolTip:
     def __init__(self, widget: tk.Widget, text_provider: Callable[[], str]) -> None:
+        # Tooltips are created lazily so the UI stays lightweight until the user hovers.
         self.widget = widget
         self.text_provider = text_provider
         self.tooltip_window: tk.Toplevel | None = None
@@ -150,6 +155,7 @@ class HoverToolTip:
 class VideoGeniusApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
+        # Start fully transparent so the window only appears after layout and state are ready.
         self._alpha_hidden = False
         try:
             self.attributes("-alpha", 0.0)
@@ -161,6 +167,7 @@ class VideoGeniusApp(ctk.CTk):
         self.app_config: AppConfig = self.config_manager.config
         self.translator = TranslationManager(self.app_config.ui_language)
         ctk.set_appearance_mode(self._normalize_appearance_mode(self.app_config.appearance_mode))
+        # Core services are wired before building widgets so the UI can bind directly to them.
         self.setup_manager = SetupManager()
         self.gpu_detector = GPUDetector()
         self.generator_service = SceneGeneratorService()
@@ -191,6 +198,7 @@ class VideoGeniusApp(ctk.CTk):
         self._last_gpu_detection: GPUDetectionResult | None = None
         self._tooltips: list[HoverToolTip] = []
 
+        # Build the window structure first, then hydrate it with persisted config and background jobs.
         self._configure_root()
         self._create_variables()
         self._build_menu()
@@ -203,6 +211,7 @@ class VideoGeniusApp(ctk.CTk):
         self._load_history_buttons()
         self._set_status(self.t("app.ready"))
         self._schedule_initial_window_show()
+        # Long-running environment checks are deferred so the first paint stays responsive.
         self._process_queue_job_id = self.after(150, self._process_task_queue)
         self._countdown_job_id = self.after(1000, self._tick_auto_close)
         self._inspect_env_job_id = self.after(2200, self.inspect_environment)

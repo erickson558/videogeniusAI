@@ -1,5 +1,9 @@
 # Changelog
 
+## V0.1.8 - 2026-03-25
+
+- Hardened config value normalization and documented startup, config, and GUI blocks for maintainability.
+
 ## V0.1.7 - 2026-03-24
 
 - Refreshed the Windows build packaging and aligned the automatic release workflow with executable artifacts.
