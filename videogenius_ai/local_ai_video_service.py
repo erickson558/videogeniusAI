@@ -396,6 +396,7 @@ class LocalAIVideoService:
         self,
         *,
         request: VideoRenderRequest,
+        video_renderer: VideoRenderer,
         avatar_image_path: Path,
         assets_dir: Path,
         audio_dir: Path,
@@ -430,7 +431,8 @@ class LocalAIVideoService:
                     f"La escena {scene.scene_number} no tiene audio utilizable. "
                     "Local Avatar video necesita narracion o descripcion para generar lipsync."
                 )
-            audio_duration = self._media_duration(audio_path)
+            # Reuse the active renderer so avatar lipsync timing is measured with the same FFmpeg toolchain.
+            audio_duration = self._media_duration(video_renderer, audio_path)
             client = ComfyUIClient(
                 base_url=worker_urls[index % len(worker_urls)],
                 timeout_seconds=request.request_timeout_seconds,
@@ -512,6 +514,7 @@ class LocalAIVideoService:
         )
         generated_assets, generated_audio = self._generate_avatar_assets(
             request=request,
+            video_renderer=video_renderer,
             avatar_image_path=avatar_image_path,
             assets_dir=assets_dir,
             audio_dir=audio_dir,

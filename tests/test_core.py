@@ -33,7 +33,7 @@ from videogenius_ai.render_devices import (
 )
 from videogenius_ai.setup_manager import SetupManager
 from videogenius_ai.version import DISPLAY_VERSION
-from videogenius_ai.models import GenerationRequest, RenderedVideoResult, VideoProject, VideoRenderRequest
+from videogenius_ai.models import GeneratedSceneAsset, GenerationRequest, RenderedVideoResult, VideoProject, VideoRenderRequest
 from videogenius_ai.video_render_service import VideoRenderService
 from videogenius_ai.video_renderer import VideoRenderer
 from videogenius_ai.video_service import StoryboardVideoService
@@ -1022,6 +1022,63 @@ class LocalVideoSupportTests(unittest.TestCase):
         self.assertEqual(service._scene_caption(request, 0), "")  # type: ignore[attr-defined]
         with tempfile.TemporaryDirectory() as temp_dir:
             self.assertIsNone(service._scene_audio(request, 0, Path(temp_dir)))  # type: ignore[attr-defined]
+
+    def test_avatar_asset_generation_uses_renderer_for_audio_duration(self) -> None:
+        with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
+            bootstrap_renderer = mock.Mock()
+            bootstrap_renderer.ffmpeg.ffmpeg_path = "C:/ffmpeg.exe"
+            bootstrap_renderer.ffmpeg.ffprobe_path = "C:/ffprobe.exe"
+            renderer_cls.return_value = bootstrap_renderer
+            service = LocalAIVideoService()
+
+        project = self._make_project()
+        project.scenes = project.scenes[:1]
+        request = VideoRenderRequest(
+            project=project,
+            output_dir="D:/tmp/out",
+            provider="Local Avatar video",
+            comfyui_workflow_path="C:/workflow.json",
+            tts_backend="Windows local",
+        )
+        runtime_renderer = mock.Mock()
+        runtime_renderer.ffmpeg.media_duration.return_value = 2.5
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            avatar_path = root / "avatar.png"
+            audio_path = root / "scene_01.wav"
+            asset_path = root / "avatar_scene_01.mp4"
+            avatar_path.write_bytes(b"avatar")
+            audio_path.write_bytes(b"audio")
+            asset_path.write_bytes(b"video")
+            assets_dir = root / "assets"
+            audio_dir = root / "audio"
+            assets_dir.mkdir()
+            audio_dir.mkdir()
+
+            with (
+                mock.patch.object(service, "_scene_audio", return_value=audio_path),
+                mock.patch.object(service, "_scene_prompt", return_value="Avatar prompt"),
+                mock.patch.object(service, "_scene_negative_prompt", return_value=""),
+                mock.patch("videogenius_ai.local_ai_video_service.ComfyUIClient") as client_cls,
+            ):
+                client = client_cls.return_value
+                client.generate_scene_asset.return_value = GeneratedSceneAsset(
+                    asset_type="video",
+                    file_path=asset_path,
+                )
+                generated_assets, generated_audio = service._generate_avatar_assets(
+                    request=request,
+                    video_renderer=runtime_renderer,
+                    avatar_image_path=avatar_path,
+                    assets_dir=assets_dir,
+                    audio_dir=audio_dir,
+                    progress_callback=None,
+                )
+
+        runtime_renderer.ffmpeg.media_duration.assert_called_once_with(audio_path)
+        self.assertEqual(generated_audio[0], audio_path)
+        self.assertEqual(generated_assets[0].file_path, asset_path)
 
     def test_cinematic_prompt_and_negative_prompt_include_directional_details(self) -> None:
         project = self._make_project()

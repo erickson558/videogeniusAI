@@ -1,5 +1,9 @@
 # Changelog
 
+## V0.1.11 - 2026-03-25
+
+- Fixed Local Avatar video audio duration probing so avatar renders no longer fail with a missing file_path argument.
+
 ## V0.1.10 - 2026-03-25
 
 - Improved structured brief parsing so topic, scene count, and total duration are inferred from prompts like multi-curiosity YouTube Shorts scripts.
