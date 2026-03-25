@@ -37,7 +37,7 @@ from videogenius_ai.models import GenerationRequest, RenderedVideoResult, VideoP
 from videogenius_ai.video_render_service import VideoRenderService
 from videogenius_ai.video_renderer import VideoRenderer
 from videogenius_ai.video_service import StoryboardVideoService
-from videogenius_ai.utils import brief_requests_silent_narration, normalize_search_text, parse_json_payload
+from videogenius_ai.utils import aspect_ratio_for_video_format, brief_requests_silent_narration, normalize_search_text, parse_json_payload
 
 
 class JsonParsingTests(unittest.TestCase):
@@ -83,6 +83,20 @@ class BriefIntentTests(unittest.TestCase):
         self.assertTrue(brief_requests_silent_narration("Genera un video fantastico sin narración sobre IA"))
         self.assertTrue(brief_requests_silent_narration("Create a cinematic short without narration or voiceover"))
         self.assertFalse(brief_requests_silent_narration("Create a narrated video about AI"))
+
+
+class VideoFormatTests(unittest.TestCase):
+    def test_aspect_ratio_for_short_form_vertical_formats(self) -> None:
+        self.assertEqual(aspect_ratio_for_video_format("YouTube Short"), "9:16")
+        self.assertEqual(aspect_ratio_for_video_format("TikTok"), "9:16")
+        self.assertEqual(aspect_ratio_for_video_format("Instagram Reel"), "9:16")
+
+    def test_aspect_ratio_for_widescreen_formats(self) -> None:
+        self.assertEqual(aspect_ratio_for_video_format("YouTube Long"), "16:9")
+        self.assertEqual(aspect_ratio_for_video_format("Trailer"), "16:9")
+
+    def test_aspect_ratio_for_unknown_format_uses_fallback(self) -> None:
+        self.assertEqual(aspect_ratio_for_video_format("Custom format", fallback="1:1"), "1:1")
 
 
 class LMStudioModelSelectionTests(unittest.TestCase):

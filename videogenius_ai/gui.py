@@ -30,7 +30,7 @@ from .paths import APP_ROOT
 from .prompt_director import summarize_scene_shots
 from .render_devices import describe_render_selection
 from .setup_manager import COMFYUI_PACKAGE_ID, LM_STUDIO_PACKAGE_ID, SetupManager, SetupStatus
-from .utils import brief_requests_silent_narration
+from .utils import aspect_ratio_for_video_format, brief_requests_silent_narration
 from .version import APP_NAME, DISPLAY_VERSION
 from .video_render_service import VideoRenderService
 
@@ -437,7 +437,11 @@ class VideoGeniusApp(ctk.CTk):
         self.model_var = tk.StringVar(value=self.app_config.model)
         self.api_key_var = tk.StringVar(value=self.app_config.api_key)
         self.video_provider_var = tk.StringVar(value=self.app_config.video_provider)
-        self.video_aspect_ratio_var = tk.StringVar(value=self.app_config.video_aspect_ratio)
+        initial_aspect_ratio = aspect_ratio_for_video_format(
+            self.app_config.video_format,
+            fallback=self.app_config.video_aspect_ratio or "9:16",
+        )
+        self.video_aspect_ratio_var = tk.StringVar(value=initial_aspect_ratio)
         self.render_captions_var = tk.BooleanVar(value=self.app_config.render_captions)
         self.comfyui_base_url_var = tk.StringVar(value=self.app_config.comfyui_base_url)
         self.comfyui_worker_urls_var = tk.StringVar(value=self.app_config.comfyui_worker_urls)
@@ -518,6 +522,7 @@ class VideoGeniusApp(ctk.CTk):
         self.video_render_device_var.trace_add("write", lambda *_: self._schedule_render_selection_summary_update())
         self.video_encoder_var.trace_add("write", lambda *_: self._schedule_render_selection_summary_update())
         self.ffmpeg_path_var.trace_add("write", lambda *_: self._schedule_render_capability_refresh())
+        self.format_var.trace_add("write", lambda *_: self._sync_video_format_preferences())
 
     def _build_menu(self) -> None:
         menu_bar = tk.Menu(self)
@@ -1194,7 +1199,22 @@ class VideoGeniusApp(ctk.CTk):
     def _on_video_provider_change(self) -> None:
         self._sync_video_provider_ui()
         self._schedule_save()
-        self._set_status(self.t("status.provider_updated", provider=self.video_provider_var.get()))
+        provider = self.video_provider_var.get().strip() or "Storyboard local"
+        message_key = {
+            "Storyboard local": "status.provider_storyboard_note",
+            "Local AI video": "status.provider_local_ai_note",
+            "Local Avatar video": "status.provider_avatar_note",
+        }.get(provider, "status.provider_updated")
+        self._set_status(self.t(message_key, provider=provider), success=True)
+
+    def _sync_video_format_preferences(self) -> None:
+        desired_ratio = aspect_ratio_for_video_format(
+            self.format_var.get().strip() or "YouTube Short",
+            fallback=self.video_aspect_ratio_var.get().strip() or "9:16",
+        )
+        current_ratio = self.video_aspect_ratio_var.get().strip() or "9:16"
+        if current_ratio != desired_ratio:
+            self.video_aspect_ratio_var.set(desired_ratio)
 
     def _sync_video_provider_ui(self) -> None:
         provider = self.video_provider_var.get().strip() or "Storyboard local"
@@ -1431,6 +1451,12 @@ class VideoGeniusApp(ctk.CTk):
 
     def _capture_video_render_settings(self) -> dict[str, Any]:
         provider = self.video_provider_var.get().strip() or "Storyboard local"
+        aspect_ratio = aspect_ratio_for_video_format(
+            self.format_var.get().strip() or "YouTube Short",
+            fallback=self.video_aspect_ratio_var.get().strip() or "9:16",
+        )
+        if self.video_aspect_ratio_var.get().strip() != aspect_ratio:
+            self.video_aspect_ratio_var.set(aspect_ratio)
         workflow_path = self.comfyui_workflow_path_var.get().strip()
         checkpoint = self.comfyui_checkpoint_var.get().strip()
         workflow_mode = self._describe_workflow_mode(workflow_path)
@@ -1454,7 +1480,7 @@ class VideoGeniusApp(ctk.CTk):
         return {
             "output_dir": self.config_manager.resolve_output_dir(),
             "provider": provider,
-            "aspect_ratio": self.video_aspect_ratio_var.get().strip() or "9:16",
+            "aspect_ratio": aspect_ratio,
             "request_timeout_seconds": self._safe_positive_int(self.timeout_var.get(), 180),
             "render_captions": bool(self.render_captions_var.get()),
             "comfyui_base_url": self.comfyui_base_url_var.get().strip() or "http://127.0.0.1:8188",

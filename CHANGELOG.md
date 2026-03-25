@@ -1,5 +1,9 @@
 # Changelog
 
+## V0.1.9 - 2026-03-25
+
+- Synced social video formats with the correct render aspect ratio and clarified storyboard vs real AI/avatar backends in the UI.
+
 ## V0.1.8 - 2026-03-25
 
 - Hardened config value normalization and documented startup, config, and GUI blocks for maintainability.

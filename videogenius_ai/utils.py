@@ -106,6 +106,19 @@ def brief_requests_silent_narration(text: str) -> bool:
     return any(re.search(pattern, normalized) for pattern in patterns)
 
 
+def aspect_ratio_for_video_format(video_format: str, fallback: str = "9:16") -> str:
+    normalized = normalize_search_text(video_format).strip()
+    if normalized in {"9:16", "16:9", "1:1"}:
+        return normalized
+    if any(token in normalized for token in ("short", "tiktok", "reel")):
+        return "9:16"
+    if any(token in normalized for token in ("youtube long", "long form", "trailer")):
+        return "16:9"
+    if "square" in normalized or "cuadrado" in normalized:
+        return "1:1"
+    return fallback
+
+
 def _escape_control_chars_in_strings(text: str) -> str:
     escaped: list[str] = []
     in_string = False
