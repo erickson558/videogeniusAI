@@ -1173,6 +1173,20 @@ class LocalVideoSupportTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "Echo_LoadModel"):
             client.wait_for_completion("prompt-1", poll_interval_seconds=1, max_wait_seconds=3)
 
+    def test_wait_for_completion_timeout_includes_prompt_details(self) -> None:
+        client = ComfyUIClient(base_url="http://127.0.0.1:8188")
+        client._get = lambda path: {"prompt-1": {"outputs": {}}}  # type: ignore[method-assign]
+        with (
+            mock.patch("videogenius_ai.comfyui_client.time.monotonic", side_effect=[0.0, 2.0]),
+            mock.patch("videogenius_ai.comfyui_client.time.sleep"),
+            self.assertRaisesRegex(TimeoutError, "prompt-1"),
+        ):
+            client.wait_for_completion("prompt-1", poll_interval_seconds=1, max_wait_seconds=0)
+
+    def test_resolve_max_wait_seconds_scales_total_wait_from_http_timeout(self) -> None:
+        client = ComfyUIClient(base_url="http://127.0.0.1:8188", timeout_seconds=120)
+        self.assertEqual(client._resolve_max_wait_seconds(None), 3600)
+
     def test_resolve_comfyui_base_url_checks_desktop_port_first(self) -> None:
         manager = SetupManager()
         checked: list[str] = []

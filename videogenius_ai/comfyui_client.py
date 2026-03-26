@@ -234,15 +234,23 @@ class ComfyUIClient:
                 return f"ComfyUI execution failed: {message}"
         return ""
 
+    def _resolve_max_wait_seconds(self, max_wait_seconds: int | None) -> int:
+        if max_wait_seconds is not None:
+            return max(1, int(max_wait_seconds))
+        # HTTP timeouts only cover individual polling requests. Video workflows
+        # can run far longer, so keep the total wait window substantially higher.
+        return max(1800, int(self.timeout_seconds) * 30)
+
     def wait_for_completion(
         self,
         prompt_id: str,
         *,
         poll_interval_seconds: int = 2,
-        max_wait_seconds: int = 1800,
+        max_wait_seconds: int | None = None,
     ) -> dict[str, Any]:
         started = time.monotonic()
         interval = max(1, int(poll_interval_seconds))
+        max_wait = self._resolve_max_wait_seconds(max_wait_seconds)
 
         while True:
             payload = self._get(f"/history/{prompt_id}")
@@ -253,8 +261,12 @@ class ComfyUIClient:
             outputs = record.get("outputs")
             if isinstance(outputs, dict) and outputs:
                 return record
-            if time.monotonic() - started > max_wait_seconds:
-                raise TimeoutError("Timed out while waiting for ComfyUI to finish the workflow.")
+            if time.monotonic() - started > max_wait:
+                raise TimeoutError(
+                    f"Timed out after {max_wait}s while waiting for ComfyUI workflow '{prompt_id}' "
+                    f"at {self._normalize_base_url()} to finish. The job may still be running; "
+                    "check the ComfyUI queue/history or increase the timeout."
+                )
             time.sleep(interval)
 
     def _extract_asset_reference(self, record: dict[str, Any]) -> tuple[str, dict[str, Any]]:
@@ -302,6 +314,7 @@ class ComfyUIClient:
         output_prefix: str,
         destination_stem: str | Path,
         poll_interval_seconds: int = 2,
+        max_wait_seconds: int | None = None,
         extra_replacements: dict[str, Any] | None = None,
     ) -> GeneratedSceneAsset:
         prompt_id = self.queue_prompt(
@@ -311,7 +324,11 @@ class ComfyUIClient:
             output_prefix=output_prefix,
             extra_replacements=extra_replacements,
         )
-        record = self.wait_for_completion(prompt_id, poll_interval_seconds=poll_interval_seconds)
+        record = self.wait_for_completion(
+            prompt_id,
+            poll_interval_seconds=poll_interval_seconds,
+            max_wait_seconds=max_wait_seconds,
+        )
         asset_type, asset_ref = self._extract_asset_reference(record)
         suffix = Path(str(asset_ref.get("filename", ""))).suffix or (".mp4" if asset_type == "video" else ".png")
         destination_path = Path(destination_stem).with_suffix(suffix)

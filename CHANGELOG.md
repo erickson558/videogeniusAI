@@ -1,5 +1,10 @@
 # Changelog
 
+## V0.1.13 - 2026-03-26
+
+- Extended ComfyUI workflow completion waits for long-running video renders by deriving the total wait window from the HTTP timeout.
+- Improved timeout diagnostics with prompt and endpoint details, and added regression coverage for timeout scaling.
+
 ## V0.1.12 - 2026-03-26
 
 - Fixed Local Avatar audio duration probing compatibility so legacy and current render paths no longer crash.
