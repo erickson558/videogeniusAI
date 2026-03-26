@@ -1,5 +1,10 @@
 # Changelog
 
+## V0.1.12 - 2026-03-26
+
+- Fixed Local Avatar audio duration probing compatibility so legacy and current render paths no longer crash.
+- Added regression coverage for legacy single-path duration calls while preserving current renderer-based timing.
+
 ## V0.1.11 - 2026-03-25
 
 - Fixed Local Avatar video audio duration probing so avatar renders no longer fail with a missing file_path argument.

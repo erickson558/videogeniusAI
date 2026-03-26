@@ -1080,6 +1080,21 @@ class LocalVideoSupportTests(unittest.TestCase):
         self.assertEqual(generated_audio[0], audio_path)
         self.assertEqual(generated_assets[0].file_path, asset_path)
 
+    def test_avatar_media_duration_accepts_legacy_single_path_call(self) -> None:
+        with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
+            bootstrap_renderer = mock.Mock()
+            bootstrap_renderer.ffmpeg.ffmpeg_path = "C:/ffmpeg.exe"
+            bootstrap_renderer.ffmpeg.ffprobe_path = "C:/ffprobe.exe"
+            runtime_renderer = mock.Mock()
+            runtime_renderer.ffmpeg.media_duration.return_value = 3.25
+            renderer_cls.side_effect = [bootstrap_renderer, runtime_renderer]
+            service = LocalAIVideoService()
+
+            duration = service._media_duration("C:/tmp/scene_01.wav")  # type: ignore[attr-defined]
+
+        self.assertEqual(duration, 3.25)
+        runtime_renderer.ffmpeg.media_duration.assert_called_once_with("C:/tmp/scene_01.wav")
+
     def test_cinematic_prompt_and_negative_prompt_include_directional_details(self) -> None:
         project = self._make_project()
         scene = project.scenes[0]

@@ -5,6 +5,7 @@ import subprocess
 import threading
 import textwrap
 from pathlib import Path
+from typing import cast
 
 from .comfyui_client import ComfyUIClient, detect_workflow_output_mode
 from .logging_utils import configure_logging
@@ -69,7 +70,17 @@ class LocalAIVideoService:
         )
         return pool
 
-    def _media_duration(self, video_renderer: VideoRenderer, file_path: str | Path) -> float:
+    def _media_duration(
+        self,
+        video_renderer: VideoRenderer | str | Path,
+        file_path: str | Path | None = None,
+    ) -> float:
+        # Keep compatibility with older call sites that passed only the media path.
+        if file_path is None:
+            file_path = cast(str | Path, video_renderer)
+            video_renderer = self._create_renderer()
+        else:
+            video_renderer = cast(VideoRenderer, video_renderer)
         return video_renderer.ffmpeg.media_duration(file_path)
 
     def _scene_prompt(self, request: VideoRenderRequest, scene_index: int) -> str:
