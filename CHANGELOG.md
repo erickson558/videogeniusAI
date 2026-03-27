@@ -1,5 +1,12 @@
 # Changelog
 
+## V0.1.15 - 2026-03-27
+
+- Parallelized Local Avatar scene generation across reachable ComfyUI workers instead of processing every scene serially.
+- Hardened ComfyUI workflow polling so dropped prompts fail fast when they disappear from both queue and history.
+- Preserved planned scene timing by padding short local narration during FFmpeg assembly for storyboard, Local AI video, and Local Avatar video renders.
+- Expanded automatic ComfyUI worker discovery to cover adjacent ports around the configured endpoint plus common desktop defaults.
+
 ## V0.1.14 - 2026-03-26
 
 - Fixed Windows layered-window startup artifacts that caused sidebar scroll ghosts and transparent multi-monitor dragging.

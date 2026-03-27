@@ -243,6 +243,27 @@ class ComfyUIClient:
         # ComfyUI job into a many-hour hang.
         return min(3600, max(1800, int(self.timeout_seconds) * 30))
 
+    def _payload_contains_prompt_id(self, payload: Any, prompt_id: str) -> bool:
+        if isinstance(payload, dict):
+            return any(
+                key == prompt_id or self._payload_contains_prompt_id(value, prompt_id)
+                for key, value in payload.items()
+            )
+        if isinstance(payload, list):
+            return any(self._payload_contains_prompt_id(item, prompt_id) for item in payload)
+        if isinstance(payload, str):
+            return prompt_id in payload
+        return False
+
+    def _prompt_still_queued(self, prompt_id: str) -> bool:
+        try:
+            payload = self._get("/queue")
+        except requests.RequestException:
+            # If queue inspection is temporarily unavailable, fall back to the
+            # old behavior instead of producing a false negative.
+            return True
+        return self._payload_contains_prompt_id(payload, prompt_id)
+
     def wait_for_completion(
         self,
         prompt_id: str,
@@ -253,6 +274,7 @@ class ComfyUIClient:
         started = time.monotonic()
         interval = max(1, int(poll_interval_seconds))
         max_wait = self._resolve_max_wait_seconds(max_wait_seconds)
+        missing_from_queue_observations = 0
 
         while True:
             payload = self._get(f"/history/{prompt_id}")
@@ -263,6 +285,22 @@ class ComfyUIClient:
             outputs = record.get("outputs")
             if isinstance(outputs, dict) and outputs:
                 return record
+            status = record.get("status")
+            if isinstance(status, dict) and status.get("completed") is True:
+                raise ValueError("ComfyUI finished without output assets.")
+            if record:
+                missing_from_queue_observations = 0
+            elif self._prompt_still_queued(prompt_id):
+                missing_from_queue_observations = 0
+            else:
+                missing_from_queue_observations += 1
+                # Consecutive misses avoid racing the prompt submission or a
+                # transient queue poll right after a worker status update.
+                if missing_from_queue_observations >= 3:
+                    raise RuntimeError(
+                        f"ComfyUI prompt '{prompt_id}' is no longer present in history or queue at "
+                        f"{self._normalize_base_url()}. The server may have restarted or dropped the job."
+                    )
             if time.monotonic() - started > max_wait:
                 raise TimeoutError(
                     f"Timed out after {max_wait}s while waiting for ComfyUI workflow '{prompt_id}' "

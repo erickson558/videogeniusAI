@@ -137,14 +137,22 @@ class SetupManager:
         return [root / filename for root in roots for filename in filenames]
 
     def _candidate_comfyui_urls(self, configured_url: str) -> list[str]:
-        candidates = [
-            configured_url.strip(),
-            "http://127.0.0.1:8000",
-            "http://127.0.0.1:8188",
-            "http://127.0.0.1:8189",
-            "http://127.0.0.1:8190",
-            "http://127.0.0.1:8191",
+        configured = configured_url.strip().rstrip("/")
+        host, port = self._comfyui_host_port(configured)
+        candidate_ports = [
+            DEFAULT_COMFYUI_PORT,
+            8030,
+            8188,
+            8189,
+            8190,
+            8191,
+            port,
+            port + 1,
+            port + 2,
+            port + 3,
         ]
+        candidates = [configured]
+        candidates.extend(f"http://{host}:{candidate_port}" for candidate_port in candidate_ports if candidate_port > 0)
         seen: set[str] = set()
         normalized: list[str] = []
         for item in candidates:

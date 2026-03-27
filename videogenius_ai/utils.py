@@ -219,6 +219,21 @@ def safe_float(value: Any, default: float) -> float:
         return default
 
 
+def scene_target_duration(
+    planned_duration_seconds: float,
+    media_duration_seconds: float | None = None,
+    *,
+    minimum_seconds: float = 1.0,
+) -> float:
+    # Preserve the authored timeline when TTS is shorter, while still allowing
+    # longer narration to expand the scene naturally instead of being cut off.
+    planned = max(minimum_seconds, safe_float(planned_duration_seconds, minimum_seconds))
+    if media_duration_seconds is None:
+        return planned
+    observed = max(minimum_seconds, safe_float(media_duration_seconds, planned))
+    return max(planned, observed)
+
+
 def ensure_directory(path: str | Path) -> Path:
     directory = Path(path)
     directory.mkdir(parents=True, exist_ok=True)

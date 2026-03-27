@@ -14,7 +14,7 @@ from .models import RenderedVideoResult, SceneShot, VideoProject, VideoRenderReq
 from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt, summarize_scene_shots
 from .render_devices import VideoEncoderPlan
 from .tts_service import PiperTTSService, WindowsTTSService
-from .utils import brief_requests_silent_narration, now_stamp, sanitize_filename
+from .utils import brief_requests_silent_narration, now_stamp, sanitize_filename, scene_target_duration
 from .video_renderer import VideoRenderer
 
 CREATE_NO_WINDOW = 0x08000000
@@ -244,6 +244,11 @@ class StoryboardVideoService:
             else:
                 command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v:0", "-map", "1:a:0"])
 
+            if audio_path:
+                # Keep the planned scene duration even when TTS finishes early by
+                # padding the tail with silence instead of cutting the clip short.
+                command.extend(["-af", f"apad=whole_dur={target_duration:.3f}"])
+
             command.extend(
                 [
                     "-vf",
@@ -320,6 +325,8 @@ class StoryboardVideoService:
                 filters.append(self._subtitle_filter(subtitle_path, width, height))
             if filters:
                 command.extend(["-vf", ",".join(filters)])
+            if audio_path:
+                command.extend(["-af", f"apad=whole_dur={target_duration:.3f}"])
 
             command.extend(
                 [
@@ -735,7 +742,12 @@ class StoryboardVideoService:
                     exc,
                 )
                 audio_path = None
-            duration_seconds = self._media_duration(video_renderer, audio_path) if audio_path else float(max(2, scene.duration_seconds))
+            audio_duration = self._media_duration(video_renderer, audio_path) if audio_path else None
+            duration_seconds = scene_target_duration(
+                scene.duration_seconds,
+                audio_duration,
+                minimum_seconds=2.0,
+            )
             subtitle_path: Path | None = None
             if request.render_captions:
                 caption_text = self._scene_caption(request.project, index)

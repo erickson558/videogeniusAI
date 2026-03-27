@@ -37,7 +37,13 @@ from videogenius_ai.models import GeneratedSceneAsset, GenerationRequest, Render
 from videogenius_ai.video_render_service import VideoRenderService
 from videogenius_ai.video_renderer import VideoRenderer
 from videogenius_ai.video_service import StoryboardVideoService
-from videogenius_ai.utils import aspect_ratio_for_video_format, brief_requests_silent_narration, normalize_search_text, parse_json_payload
+from videogenius_ai.utils import (
+    aspect_ratio_for_video_format,
+    brief_requests_silent_narration,
+    normalize_search_text,
+    parse_json_payload,
+    scene_target_duration,
+)
 
 
 class JsonParsingTests(unittest.TestCase):
@@ -110,6 +116,10 @@ class VideoFormatTests(unittest.TestCase):
 
     def test_aspect_ratio_for_unknown_format_uses_fallback(self) -> None:
         self.assertEqual(aspect_ratio_for_video_format("Custom format", fallback="1:1"), "1:1")
+
+    def test_scene_target_duration_preserves_planned_timing_when_audio_is_shorter(self) -> None:
+        self.assertEqual(scene_target_duration(8.0, 7.2, minimum_seconds=2.0), 8.0)
+        self.assertEqual(scene_target_duration(8.0, 9.1, minimum_seconds=2.0), 9.1)
 
 
 class LMStudioModelSelectionTests(unittest.TestCase):
@@ -1036,6 +1046,91 @@ class LocalVideoSupportTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             self.assertIsNone(service._scene_audio(request, 0, Path(temp_dir)))  # type: ignore[attr-defined]
 
+    def test_local_ai_scene_clip_pads_short_audio_to_target_duration(self) -> None:
+        with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
+            bootstrap_renderer = mock.Mock()
+            bootstrap_renderer.ffmpeg.ffmpeg_path = "C:/ffmpeg.exe"
+            bootstrap_renderer.ffmpeg.ffprobe_path = "C:/ffprobe.exe"
+            renderer_cls.return_value = bootstrap_renderer
+            service = LocalAIVideoService()
+
+        runtime_renderer = mock.Mock()
+        runtime_renderer.ffmpeg.ffmpeg_path = "C:/ffmpeg.exe"
+        captured: dict[str, list[str]] = {}
+        encoder_plan = VideoEncoderPlan(
+            label="CPU only",
+            encoder_name="libx264",
+            ffmpeg_args=("-c:v", "libx264"),
+        )
+
+        def fake_run_with_fallback(command_factory, active_plan, **_kwargs):  # type: ignore[no-untyped-def]
+            captured["command"] = command_factory(active_plan)
+            return active_plan
+
+        runtime_renderer.run_with_fallback.side_effect = fake_run_with_fallback
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            asset_path = root / "asset.mp4"
+            audio_path = root / "audio.wav"
+            output_path = root / "scene.mp4"
+            asset_path.write_bytes(b"video")
+            audio_path.write_bytes(b"audio")
+            service._build_scene_clip(  # type: ignore[attr-defined]
+                video_renderer=runtime_renderer,
+                asset=GeneratedSceneAsset(asset_type="video", file_path=asset_path),
+                audio_path=audio_path,
+                target_duration=8.0,
+                width=720,
+                height=1280,
+                subtitle_path=None,
+                output_path=output_path,
+                encoder_plan=encoder_plan,
+            )
+
+        self.assertIn("-af", captured["command"])
+        self.assertIn("apad=whole_dur=8.000", captured["command"])
+
+    def test_storyboard_scene_clip_pads_short_audio_to_target_duration(self) -> None:
+        service = StoryboardVideoService()
+        runtime_renderer = mock.Mock()
+        runtime_renderer.ffmpeg.ffmpeg_path = "C:/ffmpeg.exe"
+        captured: dict[str, list[str]] = {}
+        encoder_plan = VideoEncoderPlan(
+            label="CPU only",
+            encoder_name="libx264",
+            ffmpeg_args=("-c:v", "libx264"),
+        )
+
+        def fake_run_with_fallback(command_factory, active_plan, **_kwargs):  # type: ignore[no-untyped-def]
+            captured["command"] = command_factory(active_plan)
+            return active_plan
+
+        runtime_renderer.run_with_fallback.side_effect = fake_run_with_fallback
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            image_path = root / "frame.png"
+            audio_path = root / "audio.wav"
+            output_path = root / "scene.mp4"
+            Image.new("RGB", (64, 64), "black").save(image_path)
+            audio_path.write_bytes(b"audio")
+            service._build_scene_clip(  # type: ignore[attr-defined]
+                video_renderer=runtime_renderer,
+                image_path=image_path,
+                audio_path=audio_path,
+                target_duration=8.0,
+                width=720,
+                height=1280,
+                scene_index=0,
+                subtitle_path=None,
+                output_path=output_path,
+                encoder_plan=encoder_plan,
+            )
+
+        self.assertIn("-af", captured["command"])
+        self.assertIn("apad=whole_dur=8.000", captured["command"])
+
     def test_avatar_asset_generation_uses_renderer_for_audio_duration(self) -> None:
         with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
             bootstrap_renderer = mock.Mock()
@@ -1094,6 +1189,76 @@ class LocalVideoSupportTests(unittest.TestCase):
         self.assertEqual(generated_assets[0].file_path, asset_path)
         _, kwargs = client.generate_scene_asset.call_args
         self.assertEqual(kwargs["max_wait_seconds"], 1800)
+
+    def test_avatar_asset_generation_distributes_scenes_across_available_workers(self) -> None:
+        with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
+            bootstrap_renderer = mock.Mock()
+            bootstrap_renderer.ffmpeg.ffmpeg_path = "C:/ffmpeg.exe"
+            bootstrap_renderer.ffmpeg.ffprobe_path = "C:/ffprobe.exe"
+            renderer_cls.return_value = bootstrap_renderer
+            service = LocalAIVideoService()
+
+        project = self._make_project()
+        project.scenes = project.scenes[:2]
+        request = VideoRenderRequest(
+            project=project,
+            output_dir="D:/tmp/out",
+            provider="Local Avatar video",
+            comfyui_base_url="http://127.0.0.1:8188",
+            comfyui_worker_urls="http://127.0.0.1:8189",
+            parallel_scene_workers=2,
+            comfyui_workflow_path="C:/workflow.json",
+            tts_backend="Windows local",
+        )
+        runtime_renderer = mock.Mock()
+        runtime_renderer.ffmpeg.media_duration.return_value = 2.5
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            avatar_path = root / "avatar.png"
+            avatar_path.write_bytes(b"avatar")
+            assets_dir = root / "assets"
+            audio_dir = root / "audio"
+            assets_dir.mkdir()
+            audio_dir.mkdir()
+            audio_paths = [audio_dir / "scene_01.wav", audio_dir / "scene_02.wav"]
+            asset_paths = [assets_dir / "avatar_scene_01.mp4", assets_dir / "avatar_scene_02.mp4"]
+            for path in [*audio_paths, *asset_paths]:
+                path.write_bytes(b"data")
+
+            with (
+                mock.patch.object(service, "_scene_audio", side_effect=audio_paths),
+                mock.patch.object(service, "_scene_prompt", return_value="Avatar prompt"),
+                mock.patch.object(service, "_scene_negative_prompt", return_value=""),
+                mock.patch("videogenius_ai.local_ai_video_service.ComfyUIClient") as client_cls,
+            ):
+                client_one = mock.Mock()
+                client_two = mock.Mock()
+                client_cls.side_effect = [client_one, client_two]
+                client_one.generate_scene_asset.return_value = GeneratedSceneAsset(
+                    asset_type="video",
+                    file_path=asset_paths[0],
+                )
+                client_two.generate_scene_asset.return_value = GeneratedSceneAsset(
+                    asset_type="video",
+                    file_path=asset_paths[1],
+                )
+
+                generated_assets, generated_audio = service._generate_avatar_assets(
+                    request=request,
+                    video_renderer=runtime_renderer,
+                    avatar_image_path=avatar_path,
+                    assets_dir=assets_dir,
+                    audio_dir=audio_dir,
+                    progress_callback=None,
+                )
+
+        self.assertEqual(set(generated_assets.keys()), {0, 1})
+        self.assertEqual(set(generated_audio.keys()), {0, 1})
+        self.assertEqual(
+            {kwargs["base_url"] for _args, kwargs in client_cls.call_args_list},
+            {"http://127.0.0.1:8188", "http://127.0.0.1:8189"},
+        )
 
     def test_avatar_media_duration_accepts_legacy_single_path_call(self) -> None:
         with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
@@ -1197,6 +1362,22 @@ class LocalVideoSupportTests(unittest.TestCase):
             self.assertRaisesRegex(TimeoutError, "prompt-1"),
         ):
             client.wait_for_completion("prompt-1", poll_interval_seconds=1, max_wait_seconds=0)
+
+    def test_wait_for_completion_raises_when_prompt_disappears_from_history_and_queue(self) -> None:
+        client = ComfyUIClient(base_url="http://127.0.0.1:8188")
+
+        def fake_get(path: str) -> dict[str, object]:
+            if path == "/queue":
+                return {"queue_running": [], "queue_pending": []}
+            return {}
+
+        client._get = fake_get  # type: ignore[method-assign]
+        with (
+            mock.patch("videogenius_ai.comfyui_client.time.monotonic", side_effect=[0.0, 0.1, 0.2]),
+            mock.patch("videogenius_ai.comfyui_client.time.sleep"),
+            self.assertRaisesRegex(RuntimeError, "no longer present in history or queue"),
+        ):
+            client.wait_for_completion("prompt-1", poll_interval_seconds=1, max_wait_seconds=5)
 
     def test_resolve_max_wait_seconds_scales_total_wait_from_http_timeout(self) -> None:
         client = ComfyUIClient(base_url="http://127.0.0.1:8188", timeout_seconds=120)

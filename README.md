@@ -1,6 +1,6 @@
 # VideoGeniusAI
 
-Current app version: `V0.1.14`
+Current app version: `V0.1.15`
 
 VideoGeniusAI is a Windows desktop application built in Python that turns a prompt into a structured short-form video project and can render the final MP4 locally.
 
@@ -34,6 +34,8 @@ The primary UX goal is a one-click flow for end users: write the prompt, click `
 - GPU detection in the GUI with a selectable GPU for auto-launched `ComfyUI` renders
 - Automatic ComfyUI port discovery on common local endpoints
 - Support for multiple ComfyUI workers across ports
+- Local Avatar worker parallelism across multiple reachable ComfyUI endpoints
+- Planned scene timings preserved even when local TTS narration finishes early
 - Optional subtitle burning and local narration
 - Persistent local configuration and history next to the app
 - Version shown inside the UI with release-aligned `Vx.y.z` format

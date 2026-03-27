@@ -13,7 +13,7 @@ from .models import GeneratedSceneAsset, RenderedVideoResult, VideoRenderRequest
 from .prompt_director import build_cinematic_scene_prompt, build_scene_negative_prompt
 from .render_devices import VideoEncoderPlan
 from .tts_service import PiperTTSService, WindowsTTSService
-from .utils import brief_requests_silent_narration, now_stamp, sanitize_filename
+from .utils import brief_requests_silent_narration, now_stamp, sanitize_filename, scene_target_duration
 from .video_renderer import VideoRenderer
 
 CREATE_NO_WINDOW = 0x08000000
@@ -211,6 +211,11 @@ class LocalAIVideoService:
                 command.extend(["-i", str(audio_path), "-map", "0:v:0", "-map", "1:a:0"])
             else:
                 command.extend(["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100", "-map", "0:v:0", "-map", "1:a:0"])
+
+            if audio_path:
+                # Pad short narration with silence so the authored scene timing
+                # stays intact instead of being truncated by the TTS duration.
+                command.extend(["-af", f"apad=whole_dur={target_duration:.3f}"])
 
             command.extend(
                 [
@@ -445,80 +450,114 @@ class LocalAIVideoService:
 
         worker_urls = self._worker_urls(request)
         total_scenes = max(1, len(request.project.scenes))
+        max_workers = self._effective_worker_count(request, total_scenes)
         generated_assets: dict[int, GeneratedSceneAsset] = {}
         generated_audio: dict[int, Path] = {}
+        lock = threading.Lock()
+        completed_assets = 0
         self.logger.info(
             "Generating Local Avatar assets | workers=%s | worker_urls=%s | avatar_image=%s",
-            len(worker_urls),
+            max_workers,
             ", ".join(worker_urls),
             avatar_image_path,
         )
         avatar_width, avatar_height = self._avatar_dimensions_for_ratio(request.aspect_ratio)
 
-        for index, scene in enumerate(request.project.scenes):
-            if progress_callback:
-                progress_callback(
-                    0.06 + ((index / total_scenes) * 0.42),
-                    f"Avatar local: preparando escena {scene.scene_number}/{total_scenes}...",
-                )
-            audio_path = self._scene_audio(request, index, audio_dir)
-            if audio_path is None:
-                raise LocalAIVideoWorkflowError(
-                    f"La escena {scene.scene_number} no tiene audio utilizable. "
-                    "Local Avatar video necesita narracion o descripcion para generar lipsync."
-                )
-            # Reuse the active renderer so avatar lipsync timing is measured with the same FFmpeg toolchain.
-            audio_duration = self._media_duration(video_renderer, audio_path)
-            scene_timeout_seconds = self._workflow_wait_timeout_seconds(
-                request,
-                expected_duration_seconds=audio_duration,
-            )
+        assignments: list[list[int]] = [[] for _ in range(max_workers)]
+        for index in range(total_scenes):
+            assignments[index % max_workers].append(index)
+
+        def run_worker(worker_index: int) -> None:
+            nonlocal completed_assets
+            worker_url = worker_urls[worker_index % len(worker_urls)]
             client = ComfyUIClient(
-                base_url=worker_urls[index % len(worker_urls)],
+                base_url=worker_url,
                 timeout_seconds=request.request_timeout_seconds,
             )
-            try:
-                asset = client.generate_scene_asset(
-                    workflow_path=request.comfyui_workflow_path,
-                    prompt_text=self._scene_prompt(request, index),
-                    negative_prompt=self._scene_negative_prompt(request, index),
-                    output_prefix=f"{sanitize_filename(request.project.title)}_avatar_scene_{scene.scene_number:02d}",
-                    destination_stem=assets_dir / f"avatar_scene_{scene.scene_number:02d}",
-                    poll_interval_seconds=request.comfyui_poll_interval_seconds,
-                    max_wait_seconds=scene_timeout_seconds,
-                    extra_replacements=self._avatar_replacements(
-                        avatar_image_path,
-                        audio_path,
-                        width=avatar_width,
-                        height=avatar_height,
-                        fps=AVATAR_WORKFLOW_FPS,
-                        duration_seconds=audio_duration,
-                    ),
-                )
-            except TimeoutError as exc:
-                raise LocalAIVideoWorkflowError(
-                    f"ComfyUI excedio el tiempo limite en la escena {scene.scene_number} "
-                    f"despues de {scene_timeout_seconds}s en {worker_urls[index % len(worker_urls)]}. "
-                    "Revisa la cola/historial de ComfyUI o reduce la complejidad del workflow/avatar."
-                ) from exc
-            if asset.asset_type != "video":
-                raise LocalAIVideoWorkflowError(
-                    "El workflow de avatar devolvio una imagen estatica. "
-                    "Para 'Local Avatar video' el workflow debe devolver clips de video o gifs animados."
-                )
-            generated_assets[index] = asset
-            generated_audio[index] = audio_path
+            worker_scenes = assignments[worker_index]
             self.logger.info(
-                "Avatar scene completed | scene_number=%s | asset_type=%s | file_path=%s",
-                scene.scene_number,
-                asset.asset_type,
-                asset.file_path,
+                "ComfyUI avatar worker started | worker_index=%s | base_url=%s | assigned_scenes=%s",
+                worker_index + 1,
+                worker_url,
+                [request.project.scenes[index].scene_number for index in worker_scenes],
             )
-            if progress_callback:
-                progress_callback(
-                    0.1 + (((index + 1) / total_scenes) * 0.42),
-                    f"Avatar local: {index + 1}/{total_scenes} escenas listas.",
+            for scene_index in worker_scenes:
+                scene = request.project.scenes[scene_index]
+                with lock:
+                    current_completed = completed_assets
+                if progress_callback:
+                    progress_callback(
+                        0.06 + (current_completed / total_scenes) * 0.42,
+                        f"Worker avatar {worker_index + 1}/{max_workers}: preparando escena {scene.scene_number}/{total_scenes}...",
+                    )
+                audio_path = self._scene_audio(request, scene_index, audio_dir)
+                if audio_path is None:
+                    raise LocalAIVideoWorkflowError(
+                        f"La escena {scene.scene_number} no tiene audio utilizable. "
+                        "Local Avatar video necesita narracion o descripcion para generar lipsync."
+                    )
+                # Reuse the active renderer so avatar timing stays aligned with the
+                # same FFmpeg toolchain used later during composition.
+                audio_duration = self._media_duration(video_renderer, audio_path)
+                target_duration = scene_target_duration(
+                    scene.duration_seconds,
+                    audio_duration,
+                    minimum_seconds=2.0,
                 )
+                scene_timeout_seconds = self._workflow_wait_timeout_seconds(
+                    request,
+                    expected_duration_seconds=target_duration,
+                )
+                try:
+                    asset = client.generate_scene_asset(
+                        workflow_path=request.comfyui_workflow_path,
+                        prompt_text=self._scene_prompt(request, scene_index),
+                        negative_prompt=self._scene_negative_prompt(request, scene_index),
+                        output_prefix=f"{sanitize_filename(request.project.title)}_avatar_scene_{scene.scene_number:02d}",
+                        destination_stem=assets_dir / f"avatar_scene_{scene.scene_number:02d}",
+                        poll_interval_seconds=request.comfyui_poll_interval_seconds,
+                        max_wait_seconds=scene_timeout_seconds,
+                        extra_replacements=self._avatar_replacements(
+                            avatar_image_path,
+                            audio_path,
+                            width=avatar_width,
+                            height=avatar_height,
+                            fps=AVATAR_WORKFLOW_FPS,
+                            duration_seconds=audio_duration,
+                        ),
+                    )
+                except TimeoutError as exc:
+                    raise LocalAIVideoWorkflowError(
+                        f"ComfyUI excedio el tiempo limite en la escena {scene.scene_number} "
+                        f"despues de {scene_timeout_seconds}s en {worker_url}. "
+                        "Revisa la cola/historial de ComfyUI o reduce la complejidad del workflow/avatar."
+                    ) from exc
+                if asset.asset_type != "video":
+                    raise LocalAIVideoWorkflowError(
+                        "El workflow de avatar devolvio una imagen estatica. "
+                        "Para 'Local Avatar video' el workflow debe devolver clips de video o gifs animados."
+                    )
+                with lock:
+                    generated_assets[scene_index] = asset
+                    generated_audio[scene_index] = audio_path
+                    completed_assets += 1
+                    self.logger.info(
+                        "Avatar scene completed | worker_index=%s | scene_number=%s | asset_type=%s | file_path=%s",
+                        worker_index + 1,
+                        scene.scene_number,
+                        asset.asset_type,
+                        asset.file_path,
+                    )
+                    if progress_callback:
+                        progress_callback(
+                            0.1 + ((completed_assets / total_scenes) * 0.42),
+                            f"Avatar local: {completed_assets}/{total_scenes} escenas listas.",
+                        )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(run_worker, worker_index) for worker_index in range(max_workers)]
+            for future in futures:
+                future.result()
         return generated_assets, generated_audio
 
     def _render_avatar_video(self, request: VideoRenderRequest, progress_callback=None) -> RenderedVideoResult:
@@ -572,7 +611,12 @@ class LocalAIVideoService:
         scene_payloads: list[dict[str, object]] = []
         for index, scene in enumerate(request.project.scenes):
             audio_path = generated_audio[index]
-            duration_seconds = self._media_duration(video_renderer, audio_path)
+            audio_duration = self._media_duration(video_renderer, audio_path)
+            duration_seconds = scene_target_duration(
+                scene.duration_seconds,
+                audio_duration,
+                minimum_seconds=2.0,
+            )
             subtitle_path: Path | None = None
             if request.render_captions:
                 caption_text = self._scene_caption(request, index)
@@ -722,7 +766,12 @@ class LocalAIVideoService:
         scene_payloads: list[dict[str, object]] = []
         for index, scene in enumerate(request.project.scenes):
             audio_path = self._scene_audio(request, index, audio_dir)
-            duration_seconds = self._media_duration(video_renderer, audio_path) if audio_path else float(scene.duration_seconds)
+            audio_duration = self._media_duration(video_renderer, audio_path) if audio_path else None
+            duration_seconds = scene_target_duration(
+                scene.duration_seconds,
+                audio_duration,
+                minimum_seconds=2.0,
+            )
             subtitle_path: Path | None = None
             if request.render_captions:
                 caption_text = self._scene_caption(request, index)
