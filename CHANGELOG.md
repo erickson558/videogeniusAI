@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.1.14 - 2026-03-26
+
+- Fixed Windows layered-window startup artifacts that caused sidebar scroll ghosts and transparent multi-monitor dragging.
+- Hardened Local Avatar ComfyUI readiness checks so reachable workers are accepted and failures report the exact endpoint.
+- Improved LM Studio JSON repair for missing commas and capped ComfyUI per-scene wait windows to avoid multi-hour hangs.
+
 ## V0.1.13 - 2026-03-26
 
 - Extended ComfyUI workflow completion waits for long-running video renders by deriving the total wait window from the HTTP timeout.

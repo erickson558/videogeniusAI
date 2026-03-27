@@ -155,13 +155,14 @@ class HoverToolTip:
 class VideoGeniusApp(ctk.CTk):
     def __init__(self) -> None:
         super().__init__()
-        # Start fully transparent so the window only appears after layout and state are ready.
-        self._alpha_hidden = False
+        # Keep the window withdrawn during startup instead of using alpha-based transparency.
+        # On Windows, layered alpha windows can repaint poorly while scrolling or dragging.
+        self._startup_hidden = False
         try:
-            self.attributes("-alpha", 0.0)
-            self._alpha_hidden = True
+            self.withdraw()
+            self._startup_hidden = True
         except tk.TclError:
-            self._alpha_hidden = False
+            self._startup_hidden = False
         self.logger = configure_logging(__name__)
         self.config_manager = ConfigManager()
         self.app_config: AppConfig = self.config_manager.config
@@ -271,16 +272,17 @@ class VideoGeniusApp(ctk.CTk):
 
     def _finalize_initial_window(self) -> None:
         self.update_idletasks()
-        if self.app_config.window_zoomed:
-            self.state("zoomed")
-        else:
+        if not self.app_config.window_zoomed:
             self.geometry(self._geometry_for_current_screen(self.app_config.window_geometry))
-        self.title(f"{APP_NAME} {DISPLAY_VERSION}")
-        if self._alpha_hidden:
+        if self._startup_hidden:
             try:
-                self.attributes("-alpha", 1.0)
+                self.deiconify()
+                self._startup_hidden = False
             except tk.TclError:
                 pass
+        if self.app_config.window_zoomed:
+            self.state("zoomed")
+        self.title(f"{APP_NAME} {DISPLAY_VERSION}")
 
     def _normalize_appearance_mode(self, value: str) -> str:
         normalized = (value or "dark").strip().lower()
@@ -1748,6 +1750,11 @@ class VideoGeniusApp(ctk.CTk):
                 "parallel_scene_workers": max(1, len(status.comfyui_worker_urls)),
                 "avatar_source_image_path": render_settings["avatar_source_image_path"],
             }
+            local_avatar_endpoint = (
+                status.comfyui_worker_urls[0]
+                if status.comfyui_worker_urls
+                else str(status.comfyui_base_url or render_settings["comfyui_base_url"]).strip().rstrip("/")
+            )
             workflow_path = str(render_settings["comfyui_workflow_path"]).strip()
             workflow_mode = self._describe_workflow_mode(workflow_path) if workflow_path else "missing"
             if workflow_mode != "video":
@@ -1756,7 +1763,9 @@ class VideoGeniusApp(ctk.CTk):
                         aspect_ratio=str(render_settings["aspect_ratio"]),
                     )
                 )
-            local_avatar_ready = status.comfyui_reachable
+            local_avatar_ready = bool(local_avatar_endpoint) and (
+                status.comfyui_reachable or bool(status.comfyui_worker_urls)
+            )
             if not local_avatar_ready:
                 self.setup_manager.ensure_package_installed(COMFYUI_PACKAGE_ID, install_missing=True)
                 if self.setup_manager.launch_application(
@@ -1770,21 +1779,29 @@ class VideoGeniusApp(ctk.CTk):
                     timeout_seconds=120,
                     require_checkpoints=False,
                 )
-                if ready:
+                worker_urls = self.setup_manager.resolve_comfyui_worker_urls(
+                    str(updates.get("comfyui_worker_urls") or render_settings["comfyui_worker_urls"]),
+                    resolved_url,
+                )
+                if ready or worker_urls:
                     local_avatar_ready = True
                     updates["comfyui_base_url"] = resolved_url
-                    worker_urls = self.setup_manager.resolve_comfyui_worker_urls(
-                        str(updates.get("comfyui_worker_urls") or render_settings["comfyui_worker_urls"]),
-                        resolved_url,
-                    )
                     updates["comfyui_worker_urls"] = ", ".join(worker_urls)
                     updates["parallel_scene_workers"] = max(1, len(worker_urls))
+                    local_avatar_endpoint = (
+                        worker_urls[0]
+                        if worker_urls
+                        else str(resolved_url or render_settings["comfyui_base_url"]).strip().rstrip("/")
+                    )
             if not local_avatar_ready:
                 raise LocalAIVideoWorkflowError(
-                    self.t("errors.avatar_comfyui_not_ready")
+                    self.t(
+                        "errors.avatar_comfyui_not_ready",
+                        url=local_avatar_endpoint or str(render_settings["comfyui_base_url"]).strip() or "http://127.0.0.1:8188",
+                    )
                 )
             avatar_nodes_ready, missing_avatar_nodes = self.setup_manager.comfyui_has_nodes(
-                str(updates.get("comfyui_base_url") or render_settings["comfyui_base_url"]),
+                local_avatar_endpoint,
                 ["Echo_LoadModel", "Echo_Predata", "Echo_Sampler", "VHS_LoadAudio", "VHS_LoadImagePath", "VHS_VideoCombine"],
             )
             if not avatar_nodes_ready:

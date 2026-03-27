@@ -71,6 +71,7 @@ def extract_json_candidate(text: str) -> str:
 
 def repair_json_candidate(text: str) -> str:
     candidate = extract_json_candidate(text).replace("\r", "")
+    candidate = candidate.replace("\u201c", '"').replace("\u201d", '"').replace("\u2018", "'").replace("\u2019", "'")
     candidate = _escape_control_chars_in_strings(candidate)
     candidate = re.sub(r"//.*?$", "", candidate, flags=re.MULTILINE)
     candidate = re.sub(r"/\*.*?\*/", "", candidate, flags=re.DOTALL)
@@ -80,7 +81,42 @@ def repair_json_candidate(text: str) -> str:
         lambda match: f'{match.group(1)}"{match.group(2).strip()}"{match.group(3)}',
         candidate,
     )
-    return candidate
+    return _repair_missing_commas_by_line(candidate)
+
+
+def _repair_missing_commas_by_line(text: str) -> str:
+    lines = text.splitlines()
+    if len(lines) <= 1:
+        return text
+
+    repaired: list[str] = []
+    for raw_line in lines:
+        current_line = raw_line
+        current_stripped = current_line.strip()
+        if repaired:
+            previous_line = repaired[-1]
+            previous_stripped = previous_line.rstrip()
+            if _line_starts_new_json_entry(current_stripped) and _line_can_end_json_entry(previous_stripped):
+                repaired[-1] = previous_line.rstrip() + ","
+        repaired.append(current_line)
+    return "\n".join(repaired)
+
+
+def _line_starts_new_json_entry(text: str) -> bool:
+    if not text:
+        return False
+    return bool(
+        re.match(r'^("[^"]+"\s*:|\{|\[)', text)
+        or re.match(r"^(true|false|null|-?\d)", text)
+    )
+
+
+def _line_can_end_json_entry(text: str) -> bool:
+    if not text or text.endswith((",", "{", "[", ":")):
+        return False
+    return bool(
+        re.search(r'("|\}|\]|true|false|null|-?\d(?:\.\d+)?(?:[eE][+-]?\d+)?)\s*$', text)
+    )
 
 
 def normalize_search_text(text: str) -> str:

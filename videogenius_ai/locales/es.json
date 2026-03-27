@@ -84,7 +84,7 @@
   },
   "errors": {
     "avatar_audio_required": "Local Avatar video necesita audio para lipsync. Usa Windows local o Piper local.",
-    "avatar_comfyui_not_ready": "ComfyUI no estuvo listo para Local Avatar video. Abre ComfyUI, carga tu workflow de avatar/lipsync y vuelve a intentar.",
+    "avatar_comfyui_not_ready": "No se pudo conectar con ComfyUI para Local Avatar video en {url}. Abre ComfyUI o corrige la URL/worker configurado y vuelve a intentar.",
     "avatar_image_missing": "Local Avatar video necesita una imagen base del avatar.",
     "avatar_image_not_found": "No se encontro la imagen base del avatar: {path}",
     "avatar_nodes_missing": "ComfyUI esta abierto, pero no cargo el stack de avatar requerido. Faltan nodos: {nodes}.",

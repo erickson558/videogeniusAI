@@ -77,6 +77,19 @@ scenes: [
         payload = parse_json_payload(raw)
         self.assertEqual(payload["summary"], "Linea 1\nLinea 2")
 
+    def test_parse_json_repairs_missing_commas_between_object_entries(self) -> None:
+        raw = """{
+title: "Demo"
+"summary": "Lista util"
+"scenes": [
+  {"scene_number": 1}
+  {"scene_number": 2}
+]
+}"""
+        payload = parse_json_payload(raw)
+        self.assertEqual(payload["title"], "Demo")
+        self.assertEqual(len(payload["scenes"]), 2)
+
 
 class BriefIntentTests(unittest.TestCase):
     def test_brief_requests_silent_narration_detects_spanish_and_english_variants(self) -> None:
@@ -1079,6 +1092,8 @@ class LocalVideoSupportTests(unittest.TestCase):
         runtime_renderer.ffmpeg.media_duration.assert_called_once_with(audio_path)
         self.assertEqual(generated_audio[0], audio_path)
         self.assertEqual(generated_assets[0].file_path, asset_path)
+        _, kwargs = client.generate_scene_asset.call_args
+        self.assertEqual(kwargs["max_wait_seconds"], 1800)
 
     def test_avatar_media_duration_accepts_legacy_single_path_call(self) -> None:
         with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
@@ -1185,6 +1200,10 @@ class LocalVideoSupportTests(unittest.TestCase):
 
     def test_resolve_max_wait_seconds_scales_total_wait_from_http_timeout(self) -> None:
         client = ComfyUIClient(base_url="http://127.0.0.1:8188", timeout_seconds=120)
+        self.assertEqual(client._resolve_max_wait_seconds(None), 3600)
+
+    def test_resolve_max_wait_seconds_caps_large_http_timeout(self) -> None:
+        client = ComfyUIClient(base_url="http://127.0.0.1:8188", timeout_seconds=900)
         self.assertEqual(client._resolve_max_wait_seconds(None), 3600)
 
     def test_resolve_comfyui_base_url_checks_desktop_port_first(self) -> None:

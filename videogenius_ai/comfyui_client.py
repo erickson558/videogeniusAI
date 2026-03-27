@@ -239,7 +239,9 @@ class ComfyUIClient:
             return max(1, int(max_wait_seconds))
         # HTTP timeouts only cover individual polling requests. Video workflows
         # can run far longer, so keep the total wait window substantially higher.
-        return max(1800, int(self.timeout_seconds) * 30)
+        # Also cap the derived wait so a large HTTP timeout does not turn a stuck
+        # ComfyUI job into a many-hour hang.
+        return min(3600, max(1800, int(self.timeout_seconds) * 30))
 
     def wait_for_completion(
         self,

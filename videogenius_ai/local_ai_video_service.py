@@ -57,6 +57,19 @@ class LocalAIVideoService:
     def _avatar_dimensions_for_ratio(self, aspect_ratio: str) -> tuple[int, int]:
         return AVATAR_WORKFLOW_DIMENSIONS.get(aspect_ratio, AVATAR_WORKFLOW_DIMENSIONS["9:16"])
 
+    def _workflow_wait_timeout_seconds(
+        self,
+        request: VideoRenderRequest,
+        *,
+        expected_duration_seconds: float | None = None,
+    ) -> int:
+        # ComfyUI video and avatar jobs can run well beyond a single HTTP request timeout,
+        # but an excessively high user timeout should not turn one stuck scene into a multi-hour hang.
+        derived_timeout = max(1800, int(request.request_timeout_seconds) * 10)
+        if expected_duration_seconds is not None:
+            derived_timeout = max(derived_timeout, int(max(1.0, expected_duration_seconds) * 20) + 300)
+        return min(3600, derived_timeout)
+
     def _encoder_pool(self, request: VideoRenderRequest, video_renderer: VideoRenderer) -> list[VideoEncoderPlan]:
         pool = video_renderer.build_encoder_pool(
             request.video_render_device_preference,
@@ -334,6 +347,10 @@ class LocalAIVideoService:
             )
             for scene_index in worker_scenes:
                 scene = request.project.scenes[scene_index]
+                scene_timeout_seconds = self._workflow_wait_timeout_seconds(
+                    request,
+                    expected_duration_seconds=float(max(2.0, scene.duration_seconds)),
+                )
                 with lock:
                     current_completed = completed_assets
                 if progress_callback:
@@ -341,14 +358,22 @@ class LocalAIVideoService:
                         0.06 + (current_completed / total_scenes) * 0.44,
                         f"Worker {worker_index + 1}/{max_workers}: generando escena {scene.scene_number}/{total_scenes}...",
                     )
-                asset = client.generate_scene_asset(
-                    workflow_path=request.comfyui_workflow_path,
-                    prompt_text=self._scene_prompt(request, scene_index),
-                    negative_prompt=self._scene_negative_prompt(request, scene_index),
-                    output_prefix=f"{sanitize_filename(request.project.title)}_scene_{scene.scene_number:02d}",
-                    destination_stem=assets_dir / f"scene_{scene.scene_number:02d}",
-                    poll_interval_seconds=request.comfyui_poll_interval_seconds,
-                )
+                try:
+                    asset = client.generate_scene_asset(
+                        workflow_path=request.comfyui_workflow_path,
+                        prompt_text=self._scene_prompt(request, scene_index),
+                        negative_prompt=self._scene_negative_prompt(request, scene_index),
+                        output_prefix=f"{sanitize_filename(request.project.title)}_scene_{scene.scene_number:02d}",
+                        destination_stem=assets_dir / f"scene_{scene.scene_number:02d}",
+                        poll_interval_seconds=request.comfyui_poll_interval_seconds,
+                        max_wait_seconds=scene_timeout_seconds,
+                    )
+                except TimeoutError as exc:
+                    raise LocalAIVideoWorkflowError(
+                        f"ComfyUI excedio el tiempo limite en la escena {scene.scene_number} "
+                        f"despues de {scene_timeout_seconds}s en {worker_urls[worker_index]}. "
+                        "Revisa la cola/historial de ComfyUI o reduce la complejidad del workflow."
+                    ) from exc
                 if asset.asset_type != "video":
                     raise LocalAIVideoWorkflowError(
                         "ComfyUI devolvio una imagen estatica para una escena. "
@@ -444,26 +469,38 @@ class LocalAIVideoService:
                 )
             # Reuse the active renderer so avatar lipsync timing is measured with the same FFmpeg toolchain.
             audio_duration = self._media_duration(video_renderer, audio_path)
+            scene_timeout_seconds = self._workflow_wait_timeout_seconds(
+                request,
+                expected_duration_seconds=audio_duration,
+            )
             client = ComfyUIClient(
                 base_url=worker_urls[index % len(worker_urls)],
                 timeout_seconds=request.request_timeout_seconds,
             )
-            asset = client.generate_scene_asset(
-                workflow_path=request.comfyui_workflow_path,
-                prompt_text=self._scene_prompt(request, index),
-                negative_prompt=self._scene_negative_prompt(request, index),
-                output_prefix=f"{sanitize_filename(request.project.title)}_avatar_scene_{scene.scene_number:02d}",
-                destination_stem=assets_dir / f"avatar_scene_{scene.scene_number:02d}",
-                poll_interval_seconds=request.comfyui_poll_interval_seconds,
-                extra_replacements=self._avatar_replacements(
-                    avatar_image_path,
-                    audio_path,
-                    width=avatar_width,
-                    height=avatar_height,
-                    fps=AVATAR_WORKFLOW_FPS,
-                    duration_seconds=audio_duration,
-                ),
-            )
+            try:
+                asset = client.generate_scene_asset(
+                    workflow_path=request.comfyui_workflow_path,
+                    prompt_text=self._scene_prompt(request, index),
+                    negative_prompt=self._scene_negative_prompt(request, index),
+                    output_prefix=f"{sanitize_filename(request.project.title)}_avatar_scene_{scene.scene_number:02d}",
+                    destination_stem=assets_dir / f"avatar_scene_{scene.scene_number:02d}",
+                    poll_interval_seconds=request.comfyui_poll_interval_seconds,
+                    max_wait_seconds=scene_timeout_seconds,
+                    extra_replacements=self._avatar_replacements(
+                        avatar_image_path,
+                        audio_path,
+                        width=avatar_width,
+                        height=avatar_height,
+                        fps=AVATAR_WORKFLOW_FPS,
+                        duration_seconds=audio_duration,
+                    ),
+                )
+            except TimeoutError as exc:
+                raise LocalAIVideoWorkflowError(
+                    f"ComfyUI excedio el tiempo limite en la escena {scene.scene_number} "
+                    f"despues de {scene_timeout_seconds}s en {worker_urls[index % len(worker_urls)]}. "
+                    "Revisa la cola/historial de ComfyUI o reduce la complejidad del workflow/avatar."
+                ) from exc
             if asset.asset_type != "video":
                 raise LocalAIVideoWorkflowError(
                     "El workflow de avatar devolvio una imagen estatica. "

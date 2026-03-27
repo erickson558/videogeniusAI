@@ -11,6 +11,7 @@ VERSION_FILE = ROOT / "videogenius_ai" / "version.py"
 CHANGELOG_FILE = ROOT / "CHANGELOG.md"
 MANUAL_FILE = ROOT / "MANUAL_USUARIO.md"
 README_FILE = ROOT / "README.md"
+WINDOWS_VERSION_INFO_FILE = ROOT / "videogeniusAI_version_info.txt"
 VERSION_PATTERN = re.compile(r'APP_VERSION = "(\d+\.\d+\.\d+)"')
 DISPLAY_VERSION_PATTERN = re.compile(r"V\d+\.\d+\.\d+")
 
@@ -75,6 +76,19 @@ def update_readme(version: str) -> None:
     README_FILE.write_text(content, encoding="utf-8")
 
 
+def update_windows_version_info(version: str) -> None:
+    if not WINDOWS_VERSION_INFO_FILE.exists():
+        return
+    major, minor, patch = [int(part) for part in version.split(".")]
+    tuple_version = f"({major}, {minor}, {patch}, 0)"
+    content = WINDOWS_VERSION_INFO_FILE.read_text(encoding="utf-8")
+    content = re.sub(r"filevers=\(\d+,\s*\d+,\s*\d+,\s*\d+\)", f"filevers={tuple_version}", content, count=1)
+    content = re.sub(r"prodvers=\(\d+,\s*\d+,\s*\d+,\s*\d+\)", f"prodvers={tuple_version}", content, count=1)
+    content = re.sub(r"StringStruct\('FileVersion',\s*'[^']+'\)", f"StringStruct('FileVersion', '{version}')", content, count=1)
+    content = re.sub(r"StringStruct\('ProductVersion',\s*'[^']+'\)", f"StringStruct('ProductVersion', '{version}')", content, count=1)
+    WINDOWS_VERSION_INFO_FILE.write_text(content, encoding="utf-8")
+
+
 def update_changelog(version: str, notes: list[str]) -> None:
     changelog = CHANGELOG_FILE.read_text(encoding="utf-8")
     bullet_lines = "\n".join(f"- {note}" for note in notes) if notes else "- Maintenance release."
@@ -105,6 +119,7 @@ def write_version(version: str, notes: list[str]) -> None:
     update_version_file(version)
     update_readme(version)
     update_manual(version)
+    update_windows_version_info(version)
     update_changelog(version, notes)
 
 
