@@ -2,14 +2,11 @@
 
 ## V0.1.16 - 2026-03-28
 
-- fix: Añadido botón en la GUI para reiniciar ComfyUI desde el menú principal.
-- Mejora de robustez y experiencia de usuario ante cuelgues de ComfyUI.
-- Manejo de errores y feedback visual en la barra de estado.
-- No se rompe ninguna funcionalidad existente.
 
 ## V0.1.15 - 2026-03-27
+## V0.1.17 - 2026-03-28
 
-- Parallelized Local Avatar scene generation across reachable ComfyUI workers instead of processing every scene serially.
+- fix: Restaurado build_exe.ps1 y actualizado workflow para compatibilidad con Node.js 24 en GitHub Actions.
 - Hardened ComfyUI workflow polling so dropped prompts fail fast when they disappear from both queue and history.
 - Preserved planned scene timing by padding short local narration during FFmpeg assembly for storyboard, Local AI video, and Local Avatar video renders.
 - Expanded automatic ComfyUI worker discovery to cover adjacent ports around the configured endpoint plus common desktop defaults.
