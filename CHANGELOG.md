@@ -1,5 +1,12 @@
 # Changelog
 
+## V0.1.16 - 2026-03-28
+
+- fix: Añadido botón en la GUI para reiniciar ComfyUI desde el menú principal.
+- Mejora de robustez y experiencia de usuario ante cuelgues de ComfyUI.
+- Manejo de errores y feedback visual en la barra de estado.
+- No se rompe ninguna funcionalidad existente.
+
 ## V0.1.15 - 2026-03-27
 
 - Parallelized Local Avatar scene generation across reachable ComfyUI workers instead of processing every scene serially.

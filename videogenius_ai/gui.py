@@ -15,6 +15,14 @@ from typing import Any, Callable
 import customtkinter as ctk
 import requests
 
+# Para manejo de procesos (reinicio de ComfyUI)
+import subprocess
+import sys
+try:
+    import psutil
+except ImportError:
+    psutil = None
+
 from .comfyui_client import ComfyUIClient, detect_workflow_output_mode
 from .config import AppConfig, ConfigManager, sanitize_window_geometry
 from .export_service import ExportService
@@ -545,6 +553,9 @@ class VideoGeniusApp(ctk.CTk):
         file_menu.add_separator()
         file_menu.add_command(label=self.t("menu.items.open_output"), accelerator="Ctrl+O", command=self.open_output_folder)
         file_menu.add_command(label=self.t("menu.items.exit"), accelerator="Ctrl+Q", command=self._on_close)
+        # Botón para reiniciar ComfyUI
+        file_menu.add_separator()
+        file_menu.add_command(label="Reiniciar ComfyUI", command=self._on_restart_comfyui)
         menu_bar.add_cascade(label=self.t("menu.file"), menu=file_menu)
 
         help_menu = tk.Menu(menu_bar, tearoff=0)
@@ -552,6 +563,47 @@ class VideoGeniusApp(ctk.CTk):
         menu_bar.add_cascade(label=self.t("menu.view"), menu=self._build_view_menu(menu_bar))
         menu_bar.add_cascade(label=self.t("menu.help"), menu=help_menu)
         self.config(menu=menu_bar)
+
+    def _on_restart_comfyui(self):
+        """
+        Handler para reiniciar ComfyUI desde la GUI.
+        Intenta terminar procesos existentes y lanzar uno nuevo.
+        Muestra feedback al usuario y maneja errores.
+        """
+        import threading
+        def restart():
+            self._set_status("Reiniciando ComfyUI...", success=False)
+            try:
+                # Intentar terminar procesos ComfyUI existentes
+                killed = 0
+                if psutil:
+                    for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                        try:
+                            if proc.info['name'] and ("python" in proc.info['name'].lower() or "python" in ' '.join(proc.info.get('cmdline', []))) and any("comfyui" in str(arg).lower() for arg in proc.info.get('cmdline', [])):
+                                proc.terminate()
+                                killed += 1
+                        except Exception:
+                            continue
+                else:
+                    self._set_status("psutil no está instalado. No se puede terminar procesos automáticamente.", success=False)
+                # Esperar a que terminen
+                if killed:
+                    gone, alive = psutil.wait_procs([p for p in psutil.process_iter() if p.name().lower().startswith("python")], timeout=5)
+                # Lanzar nuevo proceso ComfyUI
+                # Asume que el usuario tiene main.py en una ruta conocida
+                comfyui_path = self.app_config.comfyui_path if hasattr(self.app_config, 'comfyui_path') else None
+                if not comfyui_path or not os.path.exists(comfyui_path):
+                    # Intentar ruta por defecto
+                    comfyui_path = os.path.expanduser("~/ComfyUI/main.py")
+                if not os.path.exists(comfyui_path):
+                    self._set_status(f"No se encontró main.py de ComfyUI en {comfyui_path}", success=False)
+                    return
+                # Lanzar proceso
+                subprocess.Popen([sys.executable, comfyui_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                self._set_status("ComfyUI reiniciado correctamente.", success=True)
+            except Exception as e:
+                self._set_status(f"Error al reiniciar ComfyUI: {e}", success=False)
+        threading.Thread(target=restart, daemon=True).start()
 
     def _build_view_menu(self, menu_bar: tk.Menu) -> tk.Menu:
         view_menu = tk.Menu(menu_bar, tearoff=0)
