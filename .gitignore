@@ -18,5 +18,5 @@ runtime/
 workflows/
 videogeniusAI.exe
 videogeniusAI_*.exe
-videogeniusAI_version_info.txt
+!videogeniusAI_version_info.txt
 tmp_*/

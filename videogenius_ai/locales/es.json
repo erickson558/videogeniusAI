@@ -135,7 +135,7 @@
     "parallel_workers": "Workers en paralelo",
     "piper_executable": "Ejecutable de Piper",
     "piper_model": "Modelo de Piper",
-    "request_timeout": "Timeout de solicitud (s)",
+    "request_timeout": "Timeout HTTP de solicitud (s)",
     "render_backend": "Backend de render",
     "scene_count": "Numero de escenas",
     "temperature": "Temperature",

@@ -66,14 +66,22 @@ def update_readme(version: str) -> None:
     if not README_FILE.exists():
         return
     display_version = _display_version(version)
-    content = README_FILE.read_text(encoding="utf-8")
-    content = re.sub(
-        r"Current app version:\s*`V\d+\.\d+\.\d+`",
-        f"Current app version: `{display_version}`",
-        content,
-        count=1,
-    )
-    README_FILE.write_text(content, encoding="utf-8")
+    lines = README_FILE.read_text(encoding="utf-8").splitlines()
+    normalized: list[str] = []
+    version_line_written = False
+    version_pattern = re.compile(r"Current app version:\s*`V\d+\.\d+\.\d+`")
+    for line in lines:
+        if version_pattern.fullmatch(line.strip()):
+            if version_line_written:
+                continue
+            normalized.append(f"Current app version: `{display_version}`")
+            version_line_written = True
+            continue
+        normalized.append(line)
+    if not version_line_written:
+        insert_at = 1 if normalized and normalized[0].startswith("# ") else 0
+        normalized.insert(insert_at, f"Current app version: `{display_version}`")
+    README_FILE.write_text("\n".join(normalized) + "\n", encoding="utf-8")
 
 
 def update_windows_version_info(version: str) -> None:

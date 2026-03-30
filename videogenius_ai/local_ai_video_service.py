@@ -63,9 +63,10 @@ class LocalAIVideoService:
         *,
         expected_duration_seconds: float | None = None,
     ) -> int:
-        # ComfyUI video and avatar jobs can run well beyond a single HTTP request timeout,
-        # but an excessively high user timeout should not turn one stuck scene into a multi-hour hang.
-        derived_timeout = max(1800, int(request.request_timeout_seconds) * 10)
+        # This value is also used for LM Studio and ComfyUI HTTP requests. Treat
+        # it as a direct lower bound only when the user explicitly asks for a
+        # higher scene budget instead of multiplying it into hour-long waits.
+        derived_timeout = max(1800, int(request.request_timeout_seconds))
         if expected_duration_seconds is not None:
             derived_timeout = max(derived_timeout, int(max(1.0, expected_duration_seconds) * 20) + 300)
         return min(3600, derived_timeout)

@@ -76,8 +76,21 @@ class ComfyUIClient:
             raise ValueError("ComfyUI base URL must start with http:// or https://")
         return base
 
+    def _request_timeout_for_path(self, path: str) -> int:
+        normalized_path = path.split("?", 1)[0]
+        base_timeout = max(30, int(self.timeout_seconds))
+        # Queue and history polling should stay responsive even during longer
+        # scene renders so the app does not appear frozen between checks.
+        if normalized_path.startswith(("/history", "/queue", "/prompt", "/object_info", "/api/object_info")):
+            return min(120, base_timeout)
+        return base_timeout
+
     def _get(self, path: str, **kwargs: Any) -> dict[str, Any]:
-        response = requests.get(f"{self._normalize_base_url()}{path}", timeout=self.timeout_seconds, **kwargs)
+        response = requests.get(
+            f"{self._normalize_base_url()}{path}",
+            timeout=self._request_timeout_for_path(path),
+            **kwargs,
+        )
         response.raise_for_status()
         payload = response.json()
         if not isinstance(payload, dict):
@@ -88,7 +101,7 @@ class ComfyUIClient:
         response = requests.post(
             f"{self._normalize_base_url()}{path}",
             json=payload,
-            timeout=self.timeout_seconds,
+            timeout=self._request_timeout_for_path(path),
         )
         response.raise_for_status()
         body = response.json()
@@ -237,11 +250,10 @@ class ComfyUIClient:
     def _resolve_max_wait_seconds(self, max_wait_seconds: int | None) -> int:
         if max_wait_seconds is not None:
             return max(1, int(max_wait_seconds))
-        # HTTP timeouts only cover individual polling requests. Video workflows
-        # can run far longer, so keep the total wait window substantially higher.
-        # Also cap the derived wait so a large HTTP timeout does not turn a stuck
-        # ComfyUI job into a many-hour hang.
-        return min(3600, max(1800, int(self.timeout_seconds) * 30))
+        # timeout_seconds governs individual HTTP requests. Reusing it as a
+        # multiplier here can silently stretch short workflows into hour-long
+        # waits, so keep the overall workflow budget bounded and direct.
+        return min(3600, max(1800, int(self.timeout_seconds)))
 
     def _payload_contains_prompt_id(self, payload: Any, prompt_id: str) -> bool:
         if isinstance(payload, dict):
@@ -338,7 +350,11 @@ class ComfyUIClient:
             "subfolder": subfolder,
             "type": asset_kind,
         }
-        response = requests.get(f"{self._normalize_base_url()}/view", params=params, timeout=self.timeout_seconds)
+        response = requests.get(
+            f"{self._normalize_base_url()}/view",
+            params=params,
+            timeout=self._request_timeout_for_path("/view"),
+        )
         response.raise_for_status()
         destination = Path(destination_path)
         destination.parent.mkdir(parents=True, exist_ok=True)

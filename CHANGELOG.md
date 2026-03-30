@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.1.18 - 2026-03-30
+
+- Fixed ComfyUI workflow wait scaling so large HTTP timeout settings no longer inflate short renders into hour-long scene stalls.
+- Bounded ComfyUI status request timeouts so queue and history polling remain responsive during long local renders.
+- Hardened release version updates by normalizing duplicate README version lines and aligning app metadata to `V0.1.18`.
+
 ## V0.1.16 - 2026-03-28
 
 

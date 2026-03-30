@@ -1190,6 +1190,65 @@ class LocalVideoSupportTests(unittest.TestCase):
         _, kwargs = client.generate_scene_asset.call_args
         self.assertEqual(kwargs["max_wait_seconds"], 1800)
 
+    def test_avatar_asset_generation_does_not_multiply_large_http_timeout_into_hour_long_scene_wait(self) -> None:
+        with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
+            bootstrap_renderer = mock.Mock()
+            bootstrap_renderer.ffmpeg.ffmpeg_path = "C:/ffmpeg.exe"
+            bootstrap_renderer.ffmpeg.ffprobe_path = "C:/ffprobe.exe"
+            renderer_cls.return_value = bootstrap_renderer
+            service = LocalAIVideoService()
+
+        project = self._make_project()
+        project.scenes = project.scenes[:1]
+        request = VideoRenderRequest(
+            project=project,
+            output_dir="D:/tmp/out",
+            provider="Local Avatar video",
+            comfyui_workflow_path="C:/workflow.json",
+            tts_backend="Windows local",
+            request_timeout_seconds=600,
+        )
+        runtime_renderer = mock.Mock()
+        runtime_renderer.ffmpeg.media_duration.return_value = 4.0
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            avatar_path = root / "avatar.png"
+            audio_path = root / "scene_01.wav"
+            asset_path = root / "avatar_scene_01.mp4"
+            avatar_path.write_bytes(b"avatar")
+            audio_path.write_bytes(b"audio")
+            asset_path.write_bytes(b"video")
+            assets_dir = root / "assets"
+            audio_dir = root / "audio"
+            assets_dir.mkdir()
+            audio_dir.mkdir()
+
+            with (
+                mock.patch.object(service, "_scene_audio", return_value=audio_path),
+                mock.patch.object(service, "_scene_prompt", return_value="Avatar prompt"),
+                mock.patch.object(service, "_scene_negative_prompt", return_value=""),
+                mock.patch("videogenius_ai.local_ai_video_service.ComfyUIClient") as client_cls,
+            ):
+                client = client_cls.return_value
+                client.generate_scene_asset.return_value = GeneratedSceneAsset(
+                    asset_type="video",
+                    file_path=asset_path,
+                )
+                service._generate_avatar_assets(
+                    request=request,
+                    video_renderer=runtime_renderer,
+                    avatar_image_path=avatar_path,
+                    assets_dir=assets_dir,
+                    audio_dir=audio_dir,
+                    progress_callback=None,
+                )
+
+        _, client_kwargs = client_cls.call_args
+        self.assertEqual(client_kwargs["timeout_seconds"], 600)
+        _, kwargs = client.generate_scene_asset.call_args
+        self.assertEqual(kwargs["max_wait_seconds"], 1800)
+
     def test_avatar_asset_generation_distributes_scenes_across_available_workers(self) -> None:
         with mock.patch("videogenius_ai.local_ai_video_service.VideoRenderer") as renderer_cls:
             bootstrap_renderer = mock.Mock()
@@ -1379,13 +1438,23 @@ class LocalVideoSupportTests(unittest.TestCase):
         ):
             client.wait_for_completion("prompt-1", poll_interval_seconds=1, max_wait_seconds=5)
 
-    def test_resolve_max_wait_seconds_scales_total_wait_from_http_timeout(self) -> None:
+    def test_resolve_max_wait_seconds_uses_bounded_floor_without_http_multiplier(self) -> None:
         client = ComfyUIClient(base_url="http://127.0.0.1:8188", timeout_seconds=120)
-        self.assertEqual(client._resolve_max_wait_seconds(None), 3600)
+        self.assertEqual(client._resolve_max_wait_seconds(None), 1800)
+
+    def test_resolve_max_wait_seconds_accepts_explicitly_larger_wait_budgets(self) -> None:
+        client = ComfyUIClient(base_url="http://127.0.0.1:8188", timeout_seconds=2400)
+        self.assertEqual(client._resolve_max_wait_seconds(None), 2400)
 
     def test_resolve_max_wait_seconds_caps_large_http_timeout(self) -> None:
-        client = ComfyUIClient(base_url="http://127.0.0.1:8188", timeout_seconds=900)
+        client = ComfyUIClient(base_url="http://127.0.0.1:8188", timeout_seconds=9000)
         self.assertEqual(client._resolve_max_wait_seconds(None), 3600)
+
+    def test_request_timeout_for_status_endpoints_is_bounded(self) -> None:
+        client = ComfyUIClient(base_url="http://127.0.0.1:8188", timeout_seconds=600)
+        self.assertEqual(client._request_timeout_for_path("/history/prompt-1"), 120)
+        self.assertEqual(client._request_timeout_for_path("/queue"), 120)
+        self.assertEqual(client._request_timeout_for_path("/view"), 600)
 
     def test_resolve_comfyui_base_url_checks_desktop_port_first(self) -> None:
         manager = SetupManager()
