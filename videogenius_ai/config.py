@@ -19,6 +19,7 @@ _FALSE_TEXT = {"0", "false", "no", "off"}
 _POSITIVE_INT_FIELDS = {
     "parallel_scene_workers",
     "comfyui_poll_interval_seconds",
+    "comfyui_workflow_timeout_seconds",
     "scene_count",
     "estimated_duration_seconds",
     "auto_close_seconds",
@@ -69,6 +70,7 @@ class AppConfig:
     comfyui_workflow_path: str = ""
     comfyui_negative_prompt: str = ""
     comfyui_poll_interval_seconds: int = 2
+    comfyui_workflow_timeout_seconds: int = 7200
     tts_backend: str = "Windows local"
     ffmpeg_path: str = ""
     piper_executable_path: str = ""

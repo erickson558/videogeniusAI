@@ -463,6 +463,7 @@ class VideoGeniusApp(ctk.CTk):
         self.comfyui_workflow_path_var = tk.StringVar(value=self.app_config.comfyui_workflow_path)
         self.comfyui_negative_prompt_var = tk.StringVar(value=self.app_config.comfyui_negative_prompt)
         self.comfyui_poll_interval_var = tk.StringVar(value=str(self.app_config.comfyui_poll_interval_seconds))
+        self.comfyui_workflow_timeout_var = tk.StringVar(value=str(self.app_config.comfyui_workflow_timeout_seconds))
         self.tts_backend_var = tk.StringVar(value=self.app_config.tts_backend)
         self.ffmpeg_path_var = tk.StringVar(value=self.app_config.ffmpeg_path)
         self.piper_executable_path_var = tk.StringVar(value=self.app_config.piper_executable_path)
@@ -504,6 +505,7 @@ class VideoGeniusApp(ctk.CTk):
             self.comfyui_workflow_path_var,
             self.comfyui_negative_prompt_var,
             self.comfyui_poll_interval_var,
+            self.comfyui_workflow_timeout_var,
             self.tts_backend_var,
             self.ffmpeg_path_var,
             self.piper_executable_path_var,
@@ -1009,7 +1011,8 @@ class VideoGeniusApp(ctk.CTk):
         self._make_labeled_entry(advanced_card, 11, self.t("labels.auto_close_seconds"), self.auto_close_seconds_var)
         self._make_labeled_entry(advanced_card, 13, self.t("labels.json_retry_attempts"), self.retries_var)
         self._make_labeled_entry(advanced_card, 15, self.t("labels.request_timeout"), self.timeout_var)
-        self._make_labeled_entry(advanced_card, 17, self.t("labels.max_tokens"), self.max_tokens_var)
+        self._make_labeled_entry(advanced_card, 17, self.t("labels.comfyui_workflow_timeout"), self.comfyui_workflow_timeout_var)
+        self._make_labeled_entry(advanced_card, 19, self.t("labels.max_tokens"), self.max_tokens_var)
         row += 1
 
         actions_card = self._make_card(self.sidebar, self.t("cards.actions.title"), self.t("cards.actions.subtitle"))
@@ -1401,6 +1404,7 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_workflow_path=self.comfyui_workflow_path_var.get().strip(),
             comfyui_negative_prompt=self.comfyui_negative_prompt_var.get().strip(),
             comfyui_poll_interval_seconds=self._safe_positive_int(self.comfyui_poll_interval_var.get(), 2),
+            comfyui_workflow_timeout_seconds=self._safe_positive_int(self.comfyui_workflow_timeout_var.get(), 7200),
             tts_backend=self.tts_backend_var.get().strip() or "Windows local",
             ffmpeg_path=self.ffmpeg_path_var.get().strip(),
             piper_executable_path=self.piper_executable_path_var.get().strip(),
@@ -1536,6 +1540,7 @@ class VideoGeniusApp(ctk.CTk):
             "provider": provider,
             "aspect_ratio": aspect_ratio,
             "request_timeout_seconds": self._safe_positive_int(self.timeout_var.get(), 180),
+            "comfyui_workflow_timeout_seconds": self._safe_positive_int(self.comfyui_workflow_timeout_var.get(), 7200),
             "render_captions": bool(self.render_captions_var.get()),
             "comfyui_base_url": self.comfyui_base_url_var.get().strip() or "http://127.0.0.1:8188",
             "comfyui_worker_urls": self.comfyui_worker_urls_var.get().strip(),
@@ -1567,6 +1572,7 @@ class VideoGeniusApp(ctk.CTk):
             provider=options["provider"],
             aspect_ratio=options["aspect_ratio"],
             request_timeout_seconds=options["request_timeout_seconds"],
+            comfyui_workflow_timeout_seconds=options["comfyui_workflow_timeout_seconds"],
             render_captions=effective_render_captions,
             comfyui_base_url=options["comfyui_base_url"],
             comfyui_worker_urls=options["comfyui_worker_urls"],
@@ -1604,6 +1610,7 @@ class VideoGeniusApp(ctk.CTk):
             comfyui_workflow_path=render_settings["comfyui_workflow_path"],
             comfyui_negative_prompt=render_settings["comfyui_negative_prompt"],
             comfyui_poll_interval_seconds=self._safe_positive_int(str(render_settings["comfyui_poll_interval_seconds"]), 2),
+            comfyui_workflow_timeout_seconds=self._safe_positive_int(str(render_settings["comfyui_workflow_timeout_seconds"]), 7200),
             tts_backend=render_settings["tts_backend"],
             ffmpeg_path=render_settings["ffmpeg_path"],
             piper_executable_path=render_settings["piper_executable_path"],
@@ -1638,6 +1645,7 @@ class VideoGeniusApp(ctk.CTk):
             piper_model_path=self.piper_model_path_var.get().strip(),
             avatar_source_image_path=self.avatar_source_image_path_var.get().strip(),
             request_timeout_seconds=self._safe_positive_int(self.timeout_var.get(), 120),
+            comfyui_workflow_timeout_seconds=self._safe_positive_int(self.comfyui_workflow_timeout_var.get(), 7200),
         )
 
     def _persist_runtime_updates(
@@ -1665,6 +1673,7 @@ class VideoGeniusApp(ctk.CTk):
             "comfyui_workflow_path": "comfyui_workflow_path",
             "comfyui_negative_prompt": "comfyui_negative_prompt",
             "comfyui_poll_interval_seconds": "comfyui_poll_interval_seconds",
+            "comfyui_workflow_timeout_seconds": "comfyui_workflow_timeout_seconds",
             "tts_backend": "tts_backend",
             "piper_executable_path": "piper_executable_path",
             "piper_model_path": "piper_model_path",

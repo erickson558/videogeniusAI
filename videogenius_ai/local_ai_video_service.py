@@ -63,13 +63,16 @@ class LocalAIVideoService:
         *,
         expected_duration_seconds: float | None = None,
     ) -> int:
-        # This value is also used for LM Studio and ComfyUI HTTP requests. Treat
-        # it as a direct lower bound only when the user explicitly asks for a
-        # higher scene budget instead of multiplying it into hour-long waits.
-        derived_timeout = max(1800, int(request.request_timeout_seconds))
+        # Keep the workflow budget separate from the HTTP timeout so slow avatar
+        # renders can wait longer without forcing every API request to block.
+        derived_timeout = max(
+            1,
+            int(request.request_timeout_seconds),
+            int(request.comfyui_workflow_timeout_seconds),
+        )
         if expected_duration_seconds is not None:
             derived_timeout = max(derived_timeout, int(max(1.0, expected_duration_seconds) * 20) + 300)
-        return min(3600, derived_timeout)
+        return derived_timeout
 
     def _encoder_pool(self, request: VideoRenderRequest, video_renderer: VideoRenderer) -> list[VideoEncoderPlan]:
         pool = video_renderer.build_encoder_pool(
@@ -357,6 +360,14 @@ class LocalAIVideoService:
                     request,
                     expected_duration_seconds=float(max(2.0, scene.duration_seconds)),
                 )
+                self.logger.info(
+                    "Local AI scene queued | worker_index=%s | scene_number=%s | target_duration=%.2fs | workflow_timeout=%ss | base_url=%s",
+                    worker_index + 1,
+                    scene.scene_number,
+                    float(max(2.0, scene.duration_seconds)),
+                    scene_timeout_seconds,
+                    worker_urls[worker_index],
+                )
                 with lock:
                     current_completed = completed_assets
                 if progress_callback:
@@ -508,6 +519,15 @@ class LocalAIVideoService:
                 scene_timeout_seconds = self._workflow_wait_timeout_seconds(
                     request,
                     expected_duration_seconds=target_duration,
+                )
+                self.logger.info(
+                    "Avatar scene queued | worker_index=%s | scene_number=%s | audio_duration=%.2fs | target_duration=%.2fs | workflow_timeout=%ss | base_url=%s",
+                    worker_index + 1,
+                    scene.scene_number,
+                    audio_duration,
+                    target_duration,
+                    scene_timeout_seconds,
+                    worker_url,
                 )
                 try:
                     asset = client.generate_scene_asset(

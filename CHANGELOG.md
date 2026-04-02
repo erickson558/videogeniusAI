@@ -1,21 +1,27 @@
 # Changelog
 
+## V0.1.19 - 2026-04-02
+
+- Fixed Windows executable packaging by compiling with the project `.venv`, so `customtkinter` and its assets are bundled reliably.
+- Added a dedicated ComfyUI workflow timeout separate from the HTTP timeout for long Local AI and Local Avatar renders.
+- Improved local render logging with per-scene workflow timeout diagnostics and aligned release metadata to `V0.1.19`.
+
 ## V0.1.18 - 2026-03-30
 
 - Fixed ComfyUI workflow wait scaling so large HTTP timeout settings no longer inflate short renders into hour-long scene stalls.
 - Bounded ComfyUI status request timeouts so queue and history polling remain responsive during long local renders.
 - Hardened release version updates by normalizing duplicate README version lines and aligning app metadata to `V0.1.18`.
 
-## V0.1.16 - 2026-03-28
-
-
-## V0.1.15 - 2026-03-27
 ## V0.1.17 - 2026-03-28
 
 - fix: Restaurado build_exe.ps1 y actualizado workflow para compatibilidad con Node.js 24 en GitHub Actions.
 - Hardened ComfyUI workflow polling so dropped prompts fail fast when they disappear from both queue and history.
 - Preserved planned scene timing by padding short local narration during FFmpeg assembly for storyboard, Local AI video, and Local Avatar video renders.
 - Expanded automatic ComfyUI worker discovery to cover adjacent ports around the configured endpoint plus common desktop defaults.
+
+## V0.1.16 - 2026-03-28
+
+## V0.1.15 - 2026-03-27
 
 ## V0.1.14 - 2026-03-26
 

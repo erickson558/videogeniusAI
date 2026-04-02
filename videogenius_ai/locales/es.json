@@ -121,6 +121,7 @@
     "comfyui_base_url": "ComfyUI base URL",
     "comfyui_gpu": "GPU para ComfyUI / Local AI",
     "comfyui_poll_interval": "Intervalo de consulta a ComfyUI (s)",
+    "comfyui_workflow_timeout": "Timeout total del workflow ComfyUI (s)",
     "comfyui_workers": "URLs de workers de ComfyUI",
     "duration": "Duracion estimada (s)",
     "ffmpeg_path": "Ruta de FFmpeg",

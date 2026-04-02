@@ -156,6 +156,7 @@ class VideoRenderRequest:
     comfyui_workflow_path: str = ""
     comfyui_negative_prompt: str = ""
     comfyui_poll_interval_seconds: int = 2
+    comfyui_workflow_timeout_seconds: int = 7200
     tts_backend: str = "Windows local"
     ffmpeg_path: str = ""
     piper_executable_path: str = ""

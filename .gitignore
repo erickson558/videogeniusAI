@@ -4,6 +4,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.spec
+!videogeniusAI.spec
 build/
 build_*/
 dist/
