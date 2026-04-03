@@ -33,7 +33,7 @@ from .i18n import SUPPORTED_UI_LANGUAGES, TranslationManager, ui_language_code_f
 from .local_ai_video_service import LocalAIVideoWorkflowError
 from .lmstudio_client import LMStudioClient
 from .logging_utils import configure_logging
-from .models import GenerationRequest, VideoProject, VideoRenderRequest
+from .models import GenerationRequest, RenderedVideoResult, VideoProject, VideoRenderRequest
 from .paths import APP_ROOT
 from .prompt_director import summarize_scene_shots
 from .render_devices import describe_render_selection
@@ -49,30 +49,33 @@ def ui_color(light: str, dark: str) -> tuple[str, str]:
 
 # Central palette tokens keep the custom look consistent across the entire UI.
 THEME = {
-    "app_bg": ui_color("#E6ECF4", "#050816"),
-    "main_panel": ui_color("#F8FAFC", "#0B1120"),
-    "sidebar": ui_color("#102542", "#08101F"),
-    "status_bar": ui_color("#0F172A", "#020617"),
-    "hero": ui_color("#08101F", "#111827"),
-    "hero_text": ui_color("#F8FAFC", "#F8FAFC"),
-    "accent": ui_color("#38BDF8", "#67E8F9"),
-    "muted_text": ui_color("#475569", "#94A3B8"),
-    "soft_text": ui_color("#CBD5E1", "#CBD5E1"),
-    "primary_text": ui_color("#0F172A", "#E2E8F0"),
-    "input_bg": ui_color("#EDF2F7", "#111827"),
-    "input_border": ui_color("#D97706", "#F59E0B"),
-    "surface": ui_color("#FFFFFF", "#0F172A"),
-    "surface_alt": ui_color("#F8FAFC", "#111827"),
-    "surface_border": ui_color("#E2E8F0", "#1F2937"),
-    "card": ui_color("#0B1628", "#101827"),
-    "card_label": ui_color("#E2E8F0", "#CBD5E1"),
+    "app_bg": ui_color("#E8EDF3", "#0F1014"),
+    "main_panel": ui_color("#FFFFFF", "#15171D"),
+    "sidebar": ui_color("#0F172A", "#14161C"),
+    "status_bar": ui_color("#0F172A", "#111319"),
+    "hero": ui_color("#0B1220", "#10131A"),
+    "hero_text": ui_color("#F8FAFC", "#F5F7FA"),
+    "accent": ui_color("#06B6D4", "#18C9E6"),
+    "accent_alt": ui_color("#22C55E", "#39D47A"),
+    "muted_text": ui_color("#526072", "#99A1AE"),
+    "soft_text": ui_color("#CBD5E1", "#C6CBD3"),
+    "primary_text": ui_color("#0F172A", "#F3F4F6"),
+    "input_bg": ui_color("#F5F8FC", "#1C1F27"),
+    "input_border": ui_color("#D6DEE8", "#2A303A"),
+    "surface": ui_color("#FFFFFF", "#171A20"),
+    "surface_alt": ui_color("#F3F6FA", "#111318"),
+    "surface_border": ui_color("#D9E1EB", "#262A33"),
+    "card": ui_color("#F8FAFC", "#1A1D24"),
+    "card_alt": ui_color("#EEF3F9", "#10131A"),
+    "card_label": ui_color("#132236", "#E5E7EB"),
+    "pill": ui_color("#DFF6FB", "#20242C"),
     "status_default": ui_color("#E2E8F0", "#E2E8F0"),
     "status_error": ui_color("#FCA5A5", "#FCA5A5"),
     "status_success": ui_color("#86EFAC", "#86EFAC"),
-    "history_button": ui_color("#E2E8F0", "#1F2937"),
-    "history_hover": ui_color("#CBD5E1", "#334155"),
+    "history_button": ui_color("#EAF1F8", "#1C1F27"),
+    "history_hover": ui_color("#D8E4F1", "#272C35"),
     "menu_bg": ui_color("#0F172A", "#111827"),
-    "progress_bg": ui_color("#1E293B", "#1E293B"),
+    "progress_bg": ui_color("#233047", "#1B2230"),
 }
 
 # Default theme bootstrap happens before the root window is created.
@@ -206,6 +209,9 @@ class VideoGeniusApp(ctk.CTk):
         self._auto_close_remaining = max(1, int(self.app_config.auto_close_seconds))
         self._last_gpu_detection: GPUDetectionResult | None = None
         self._tooltips: list[HoverToolTip] = []
+        self.last_render_result: RenderedVideoResult | None = None
+        self._agent_message_widgets: list[ctk.CTkFrame] = []
+        self._last_agent_message: tuple[str, str] | None = None
 
         # Build the window structure first, then hydrate it with persisted config and background jobs.
         self._configure_root()
@@ -401,7 +407,9 @@ class VideoGeniusApp(ctk.CTk):
     def _rebuild_translated_ui(self) -> None:
         snapshot = self._capture_ui_state()
         self._tooltips = []
-        for widget_name in ["sidebar", "main_panel", "status_bar"]:
+        self._agent_message_widgets = []
+        self._last_agent_message = None
+        for widget_name in ["agent_panel", "library_panel", "main_panel", "status_bar"]:
             widget = getattr(self, widget_name, None)
             if widget is not None:
                 widget.destroy()
@@ -648,28 +656,48 @@ class VideoGeniusApp(ctk.CTk):
         self.bind("<Configure>", self._on_configure)
 
     def _build_layout(self) -> None:
-        self.grid_columnconfigure(0, weight=0)
-        self.grid_columnconfigure(1, weight=1)
+        self.grid_columnconfigure(0, weight=34, uniform="shell")
+        self.grid_columnconfigure(1, weight=24, uniform="shell")
+        self.grid_columnconfigure(2, weight=42, uniform="shell")
         self.grid_rowconfigure(0, weight=1)
         self.grid_rowconfigure(1, weight=0)
 
-        self.sidebar = ctk.CTkScrollableFrame(
+        self.agent_panel = ctk.CTkFrame(
             self,
-            width=410,
-            fg_color=THEME["sidebar"],
-            corner_radius=26,
-            border_width=0,
+            fg_color=THEME["surface"],
+            corner_radius=30,
+            border_width=1,
+            border_color=THEME["surface_border"],
         )
-        self.sidebar.grid(row=0, column=0, padx=(18, 10), pady=(18, 10), sticky="nsew")
-        self.sidebar.grid_columnconfigure(0, weight=1)
+        self.agent_panel.grid(row=0, column=0, padx=(18, 10), pady=(18, 10), sticky="nsew")
+        self.agent_panel.grid_columnconfigure(0, weight=1)
+        self.agent_panel.grid_rowconfigure(1, weight=1)
 
-        self.main_panel = ctk.CTkFrame(self, fg_color=THEME["main_panel"], corner_radius=28)
-        self.main_panel.grid(row=0, column=1, padx=(10, 18), pady=(18, 10), sticky="nsew")
+        self.library_panel = ctk.CTkFrame(
+            self,
+            fg_color=THEME["surface"],
+            corner_radius=30,
+            border_width=1,
+            border_color=THEME["surface_border"],
+        )
+        self.library_panel.grid(row=0, column=1, padx=0, pady=(18, 10), sticky="nsew")
+        self.library_panel.grid_columnconfigure(0, weight=1)
+        self.library_panel.grid_rowconfigure(1, weight=1)
+
+        self.main_panel = ctk.CTkFrame(
+            self,
+            fg_color=THEME["main_panel"],
+            corner_radius=30,
+            border_width=1,
+            border_color=THEME["surface_border"],
+        )
+        self.main_panel.grid(row=0, column=2, padx=(10, 18), pady=(18, 10), sticky="nsew")
         self.main_panel.grid_columnconfigure(0, weight=1)
         self.main_panel.grid_rowconfigure(2, weight=1)
+        self.main_panel.grid_rowconfigure(3, weight=0)
 
         self.status_bar = ctk.CTkFrame(self, fg_color=THEME["status_bar"], corner_radius=18, height=42)
-        self.status_bar.grid(row=1, column=0, columnspan=2, padx=18, pady=(0, 18), sticky="ew")
+        self.status_bar.grid(row=1, column=0, columnspan=3, padx=18, pady=(0, 18), sticky="ew")
         self.status_bar.grid_columnconfigure(0, weight=1)
         self.status_label = ctk.CTkLabel(
             self.status_bar,
@@ -686,6 +714,8 @@ class VideoGeniusApp(ctk.CTk):
         )
         self.countdown_label.grid(row=0, column=1, padx=16, pady=8, sticky="e")
 
+        self._build_agent_panel()
+        self._build_library_panel()
         self._build_sidebar()
         self._build_main_panel()
 
@@ -715,20 +745,6 @@ class VideoGeniusApp(ctk.CTk):
         ).grid(row=2, column=0, sticky="w", padx=18, pady=(0, 16))
 
         row = 1
-        topic_card = self._make_card(self.sidebar, self.t("cards.project_brief.title"), self.t("cards.project_brief.subtitle"))
-        topic_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
-        self.topic_text = ctk.CTkTextbox(
-            topic_card,
-            height=120,
-            fg_color=THEME["input_bg"],
-            text_color=THEME["primary_text"],
-            border_width=1,
-            border_color=THEME["input_border"],
-        )
-        self.topic_text.grid(row=2, column=0, padx=14, pady=(4, 14), sticky="ew")
-        self.topic_text.insert("1.0", self.app_config.video_topic)
-        self.topic_text.bind("<KeyRelease>", lambda event: self._schedule_save())
-        row += 1
 
         setup_card = self._make_card(self.sidebar, self.t("cards.setup.title"), self.t("cards.setup.subtitle"))
         setup_card.grid(row=row, column=0, sticky="ew", padx=10, pady=8)
@@ -1017,50 +1033,326 @@ class VideoGeniusApp(ctk.CTk):
 
         actions_card = self._make_card(self.sidebar, self.t("cards.actions.title"), self.t("cards.actions.subtitle"))
         actions_card.grid(row=row, column=0, sticky="ew", padx=10, pady=(8, 18))
-        self.connection_button = self._make_action_button(actions_card, 2, self.t("buttons.test_connection"), "#0284C7", "#0369A1", self.test_connection)
-        self.local_video_button = self._make_action_button(actions_card, 3, self.t("buttons.test_comfyui"), "#0F766E", "#115E59", self.test_local_video_connection)
-        self.generate_button = self._make_action_button(actions_card, 4, self.t("buttons.generate_script"), "#EA580C", "#C2410C", self.start_generation)
-        self.export_json_button = self._make_action_button(actions_card, 5, self.t("buttons.export_json"), "#4F46E5", "#4338CA", self.export_json)
-        self.export_txt_button = self._make_action_button(actions_card, 6, self.t("buttons.export_txt"), "#2563EB", "#1D4ED8", self.export_txt)
-        self.export_csv_button = self._make_action_button(actions_card, 7, self.t("buttons.export_csv"), "#0F766E", "#115E59", self.export_csv)
-        self.video_button = self._make_action_button(actions_card, 8, self.t("buttons.generate_video"), "#B45309", "#92400E", self.generate_video)
-        self.folder_button = self._make_action_button(actions_card, 9, self.t("buttons.folder"), "#334155", "#1E293B", self.open_output_folder)
-        self.exit_button = self._make_action_button(actions_card, 10, self.t("buttons.exit"), "#7F1D1D", "#7C2D12", self._on_close)
+        self.local_video_button = self._make_action_button(actions_card, 2, self.t("buttons.test_comfyui"), "#0F766E", "#115E59", self.test_local_video_connection)
+        self.export_json_button = self._make_action_button(actions_card, 3, self.t("buttons.export_json"), "#4F46E5", "#4338CA", self.export_json)
+        self.export_txt_button = self._make_action_button(actions_card, 4, self.t("buttons.export_txt"), "#2563EB", "#1D4ED8", self.export_txt)
+        self.export_csv_button = self._make_action_button(actions_card, 5, self.t("buttons.export_csv"), "#0F766E", "#115E59", self.export_csv)
+        self.exit_button = self._make_action_button(actions_card, 6, self.t("buttons.exit"), "#7F1D1D", "#7C2D12", self._on_close)
+
+    def _build_agent_panel(self) -> None:
+        header = ctk.CTkFrame(self.agent_panel, fg_color=THEME["hero"], corner_radius=28)
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 12))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header,
+            text=self.t("workspace.agent_title"),
+            text_color=THEME["hero_text"],
+            font=ctk.CTkFont("Segoe UI Variable Display", 26, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=18, pady=(16, 2))
+        ctk.CTkLabel(
+            header,
+            text=self.t("workspace.agent_subtitle", version=DISPLAY_VERSION),
+            text_color=THEME["accent"],
+            font=ctk.CTkFont("Segoe UI", 12, weight="bold"),
+        ).grid(row=1, column=0, sticky="w", padx=18)
+        self.agent_context_label = ctk.CTkLabel(
+            header,
+            text="",
+            wraplength=330,
+            justify="left",
+            text_color=THEME["soft_text"],
+            font=ctk.CTkFont("Segoe UI", 13),
+        )
+        self.agent_context_label.grid(row=2, column=0, sticky="w", padx=18, pady=(8, 16))
+
+        self.agent_tabs = ctk.CTkTabview(
+            self.agent_panel,
+            fg_color=THEME["surface_alt"],
+            segmented_button_selected_color=ui_color("#00B7D9", "#08BFD9"),
+            segmented_button_selected_hover_color=ui_color("#0299B7", "#079FB7"),
+            segmented_button_unselected_color=ui_color("#E6EDF4", "#20232B"),
+            segmented_button_unselected_hover_color=ui_color("#D8E5F1", "#272B34"),
+            text_color=THEME["primary_text"],
+            corner_radius=28,
+        )
+        self.agent_tabs.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
+        self.agent_tabs.grid_rowconfigure(0, weight=1)
+        self.agent_tabs.grid_columnconfigure(0, weight=1)
+
+        agent_tab = self.agent_tabs.add(self.t("workspace.agent_tab"))
+        setup_tab = self.agent_tabs.add(self.t("workspace.setup_tab"))
+        agent_tab.grid_columnconfigure(0, weight=1)
+        agent_tab.grid_rowconfigure(1, weight=1)
+        setup_tab.grid_columnconfigure(0, weight=1)
+        setup_tab.grid_rowconfigure(0, weight=1)
+
+        activity_card = ctk.CTkFrame(agent_tab, fg_color=THEME["card"], corner_radius=22)
+        activity_card.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+        activity_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            activity_card,
+            text=self.t("workspace.activity_title"),
+            text_color=THEME["hero_text"],
+            font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 4))
+        self.agent_activity_label = ctk.CTkLabel(
+            activity_card,
+            text=self.t("app.ready"),
+            text_color=THEME["soft_text"],
+            wraplength=320,
+            justify="left",
+            font=ctk.CTkFont("Segoe UI", 12),
+        )
+        self.agent_activity_label.grid(row=1, column=0, sticky="w", padx=16, pady=(0, 14))
+
+        self.agent_feed_scroll = ctk.CTkScrollableFrame(
+            agent_tab,
+            fg_color=THEME["surface"],
+            corner_radius=22,
+            border_width=1,
+            border_color=THEME["surface_border"],
+        )
+        self.agent_feed_scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 8))
+        self.agent_feed_scroll.grid_columnconfigure(0, weight=1)
+
+        ctk.CTkLabel(
+            agent_tab,
+            text=self.t("workspace.agent_tip"),
+            text_color=THEME["muted_text"],
+            wraplength=330,
+            justify="left",
+            font=ctk.CTkFont("Segoe UI", 12),
+        ).grid(row=2, column=0, sticky="w", padx=16, pady=(0, 10))
+
+        composer = ctk.CTkFrame(agent_tab, fg_color=THEME["surface"], corner_radius=24, border_width=1, border_color=THEME["surface_border"])
+        composer.grid(row=3, column=0, sticky="ew", padx=12, pady=(0, 12))
+        composer.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            composer,
+            text=self.t("cards.project_brief.title"),
+            text_color=THEME["primary_text"],
+            font=ctk.CTkFont("Segoe UI", 17, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=16, pady=(14, 2))
+        ctk.CTkLabel(
+            composer,
+            text=self.t("cards.project_brief.subtitle"),
+            text_color=THEME["muted_text"],
+            wraplength=320,
+            justify="left",
+            font=ctk.CTkFont("Segoe UI", 12),
+        ).grid(row=1, column=0, sticky="w", padx=16, pady=(0, 8))
+        self.topic_text = ctk.CTkTextbox(
+            composer,
+            height=128,
+            fg_color=THEME["input_bg"],
+            text_color=THEME["primary_text"],
+            border_width=1,
+            border_color=THEME["input_border"],
+        )
+        self.topic_text.grid(row=2, column=0, sticky="ew", padx=16, pady=(0, 10))
+        self.topic_text.insert("1.0", self.app_config.video_topic)
+        self.topic_text.bind("<KeyRelease>", lambda event: self._schedule_save())
+
+        action_row = ctk.CTkFrame(composer, fg_color="transparent")
+        action_row.grid(row=3, column=0, sticky="ew", padx=16, pady=(0, 16))
+        action_row.grid_columnconfigure(0, weight=1)
+        action_row.grid_columnconfigure(1, weight=1)
+        action_row.grid_columnconfigure(2, weight=1)
+        self.connection_button = ctk.CTkButton(
+            action_row,
+            text=self.t("buttons.test_connection"),
+            command=self.test_connection,
+            fg_color=ui_color("#111827", "#23262E"),
+            hover_color=ui_color("#0F172A", "#2B303A"),
+            text_color=THEME["hero_text"],
+            height=40,
+        )
+        self.connection_button.grid(row=0, column=0, sticky="ew", padx=(0, 6))
+        self.generate_button = ctk.CTkButton(
+            action_row,
+            text=self.t("buttons.generate_script"),
+            command=self.start_generation,
+            fg_color=ui_color("#0F766E", "#0F766E"),
+            hover_color=ui_color("#115E59", "#115E59"),
+            height=40,
+        )
+        self.generate_button.grid(row=0, column=1, sticky="ew", padx=6)
+        self.quick_generate_button = ctk.CTkButton(
+            action_row,
+            text=self.t("buttons.generate_full_video"),
+            command=self.generate_full_video,
+            fg_color=ui_color("#00B7D9", "#08BFD9"),
+            hover_color=ui_color("#009CB9", "#059DB8"),
+            text_color=THEME["hero_text"],
+            height=40,
+        )
+        self.quick_generate_button.grid(row=0, column=2, sticky="ew", padx=(6, 0))
+
+        self.sidebar = ctk.CTkScrollableFrame(setup_tab, fg_color="transparent", corner_radius=24, border_width=0)
+        self.sidebar.grid(row=0, column=0, sticky="nsew", padx=0, pady=0)
+        self.sidebar.grid_columnconfigure(0, weight=1)
+
+        self._append_agent_message(self.t("app.ready"), tone="assistant")
+
+    def _build_library_panel(self) -> None:
+        header = ctk.CTkFrame(self.library_panel, fg_color="transparent")
+        header.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 12))
+        header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            header,
+            text=self.t("workspace.library_title"),
+            text_color=THEME["primary_text"],
+            font=ctk.CTkFont("Segoe UI Variable Display", 24, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        ctk.CTkLabel(
+            header,
+            text=self.t("workspace.library_subtitle"),
+            text_color=THEME["muted_text"],
+            wraplength=260,
+            justify="left",
+            font=ctk.CTkFont("Segoe UI", 12),
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        self.library_tabs = ctk.CTkTabview(
+            self.library_panel,
+            fg_color=THEME["surface_alt"],
+            segmented_button_selected_color=ui_color("#141A23", "#20242C"),
+            segmented_button_selected_hover_color=ui_color("#0F172A", "#262A33"),
+            segmented_button_unselected_color=ui_color("#E8EEF5", "#181B21"),
+            segmented_button_unselected_hover_color=ui_color("#DEE8F3", "#21252E"),
+            text_color=THEME["primary_text"],
+            corner_radius=28,
+        )
+        self.library_tabs.grid(row=1, column=0, sticky="nsew", padx=18, pady=(0, 18))
+
+        videos_tab = self.library_tabs.add(self.t("workspace.videos_tab"))
+        assets_tab = self.library_tabs.add(self.t("workspace.assets_tab"))
+        videos_tab.grid_columnconfigure(0, weight=1)
+        videos_tab.grid_rowconfigure(1, weight=1)
+        assets_tab.grid_columnconfigure(0, weight=1)
+        assets_tab.grid_rowconfigure(1, weight=1)
+
+        history_header = ctk.CTkFrame(videos_tab, fg_color="transparent")
+        history_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+        history_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            history_header,
+            text=self.t("history.saved_projects"),
+            text_color=THEME["primary_text"],
+            font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.history_summary_label = ctk.CTkLabel(
+            history_header,
+            text="",
+            text_color=THEME["muted_text"],
+            font=ctk.CTkFont("Segoe UI", 11),
+        )
+        self.history_summary_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        ctk.CTkButton(
+            history_header,
+            text=self.t("buttons.refresh"),
+            command=self._load_history_buttons,
+            fg_color=ui_color("#00B7D9", "#08BFD9"),
+            hover_color=ui_color("#009CB9", "#059DB8"),
+            width=110,
+        ).grid(row=0, column=1, rowspan=2, sticky="e")
+        self.history_scroll = ctk.CTkScrollableFrame(
+            videos_tab,
+            fg_color=THEME["surface"],
+            corner_radius=22,
+            border_width=1,
+            border_color=THEME["surface_border"],
+        )
+        self.history_scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self.history_scroll.grid_columnconfigure(0, weight=1)
+
+        assets_header = ctk.CTkFrame(assets_tab, fg_color="transparent")
+        assets_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 8))
+        assets_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            assets_header,
+            text=self.t("workspace.assets_title"),
+            text_color=THEME["primary_text"],
+            font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
+        ).grid(row=0, column=0, sticky="w")
+        self.assets_summary_label = ctk.CTkLabel(
+            assets_header,
+            text=self.t("workspace.assets_empty"),
+            text_color=THEME["muted_text"],
+            font=ctk.CTkFont("Segoe UI", 11),
+        )
+        self.assets_summary_label.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self.asset_library_scroll = ctk.CTkScrollableFrame(
+            assets_tab,
+            fg_color=THEME["surface"],
+            corner_radius=22,
+            border_width=1,
+            border_color=THEME["surface_border"],
+        )
+        self.asset_library_scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
+        self.asset_library_scroll.grid_columnconfigure(0, weight=1)
 
     def _build_main_panel(self) -> None:
-        header = ctk.CTkFrame(self.main_panel, fg_color=THEME["surface"], corner_radius=24)
+        header = ctk.CTkFrame(self.main_panel, fg_color=THEME["surface_alt"], corner_radius=24)
         header.grid(row=0, column=0, sticky="ew", padx=18, pady=(18, 12))
         header.grid_columnconfigure(0, weight=1)
         header.grid_columnconfigure(1, weight=0)
 
         left = ctk.CTkFrame(header, fg_color="transparent")
         left.grid(row=0, column=0, sticky="ew", padx=18, pady=18)
-        ctk.CTkLabel(
+        self.workspace_title_label = ctk.CTkLabel(
             left,
             text=self.t("header.title"),
             text_color=THEME["primary_text"],
-            font=ctk.CTkFont("Segoe UI Variable Display", 34, weight="bold"),
-        ).grid(row=0, column=0, sticky="w")
-        ctk.CTkLabel(
+            font=ctk.CTkFont("Segoe UI Variable Display", 30, weight="bold"),
+        )
+        self.workspace_title_label.grid(row=0, column=0, sticky="w")
+        self.workspace_subtitle_label = ctk.CTkLabel(
             left,
             text=self.t("header.subtitle"),
-            wraplength=760,
+            wraplength=700,
             justify="left",
             text_color=THEME["muted_text"],
-            font=ctk.CTkFont("Segoe UI", 14),
-        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+            font=ctk.CTkFont("Segoe UI", 13),
+        )
+        self.workspace_subtitle_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
 
+        right = ctk.CTkFrame(header, fg_color="transparent")
+        right.grid(row=0, column=1, sticky="e", padx=18, pady=18)
         self.mode_segment = ctk.CTkSegmentedButton(
-            header,
+            right,
             values=["Solo guion", "Guion + prompts", "Proyecto completo"],
             variable=self.mode_var,
-            selected_color=ui_color("#F97316", "#F97316"),
-            selected_hover_color=ui_color("#EA580C", "#EA580C"),
-            unselected_color=ui_color("#E2E8F0", "#1F2937"),
-            unselected_hover_color=ui_color("#CBD5E1", "#334155"),
+            selected_color=ui_color("#00B7D9", "#08BFD9"),
+            selected_hover_color=ui_color("#009CB9", "#059DB8"),
+            unselected_color=ui_color("#E2E8F0", "#23262E"),
+            unselected_hover_color=ui_color("#D1D9E3", "#2C3038"),
             text_color=THEME["primary_text"],
         )
-        self.mode_segment.grid(row=0, column=1, padx=18, pady=18, sticky="e")
+        self.mode_segment.grid(row=0, column=0, sticky="e")
+
+        preview_actions = ctk.CTkFrame(right, fg_color="transparent")
+        preview_actions.grid(row=1, column=0, sticky="e", pady=(10, 0))
+        self.video_button = ctk.CTkButton(
+            preview_actions,
+            text=self.t("buttons.generate_video"),
+            command=self.generate_video,
+            fg_color=ui_color("#0F766E", "#0F766E"),
+            hover_color=ui_color("#115E59", "#115E59"),
+            width=148,
+            height=34,
+        )
+        self.video_button.grid(row=0, column=0, padx=(0, 8))
+        self.folder_button = ctk.CTkButton(
+            preview_actions,
+            text=self.t("buttons.folder"),
+            command=self.open_output_folder,
+            fg_color=ui_color("#141A23", "#23262E"),
+            hover_color=ui_color("#0F172A", "#2C3038"),
+            width=140,
+            height=34,
+        )
+        self.folder_button.grid(row=0, column=1)
 
         status_strip = ctk.CTkFrame(self.main_panel, fg_color=THEME["status_bar"], corner_radius=22)
         status_strip.grid(row=1, column=0, sticky="ew", padx=18, pady=(0, 12))
@@ -1073,25 +1365,29 @@ class VideoGeniusApp(ctk.CTk):
         self.connection_chip = ctk.CTkLabel(
             status_strip,
             text=self.t("status.testing_connection"),
-            text_color=ui_color("#BFDBFE", "#7DD3FC"),
+            text_color=ui_color("#A5F3FC", "#7DD3FC"),
             font=ctk.CTkFont("Segoe UI", 14, weight="bold"),
         )
         self.connection_chip.grid(row=0, column=0, sticky="w", padx=18, pady=12)
         self.render_chip = ctk.CTkLabel(
             status_strip,
             text=self.t("status.render_chip", provider=self.video_provider_var.get()),
-            text_color=ui_color("#A7F3D0", "#6EE7B7"),
+            text_color=ui_color("#BBF7D0", "#86EFAC"),
             font=ctk.CTkFont("Segoe UI", 14, weight="bold"),
         )
         self.render_chip.grid(row=0, column=1, sticky="w", padx=(0, 18), pady=12)
 
-        self.progress_bar = ctk.CTkProgressBar(status_strip, progress_color=ui_color("#F97316", "#FB923C"), fg_color=THEME["progress_bg"])
+        self.progress_bar = ctk.CTkProgressBar(
+            status_strip,
+            progress_color=ui_color("#00B7D9", "#08BFD9"),
+            fg_color=THEME["progress_bg"],
+        )
         self.progress_bar.grid(row=0, column=2, sticky="ew", padx=(0, 18), pady=12)
         self.progress_bar.set(0)
         self.progress_percent_label = ctk.CTkLabel(
             status_strip,
             text="0%",
-            text_color=ui_color("#FDBA74", "#FDBA74"),
+            text_color=ui_color("#93C5FD", "#7DD3FC"),
             font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
         )
         self.progress_percent_label.grid(row=0, column=3, sticky="e", padx=(0, 18), pady=12)
@@ -1105,55 +1401,499 @@ class VideoGeniusApp(ctk.CTk):
         )
         self.progress_detail_label.grid(row=1, column=0, columnspan=4, sticky="ew", padx=18, pady=(0, 10))
 
-        self.tab_view = ctk.CTkTabview(
-            self.main_panel,
-            fg_color=THEME["surface"],
-            segmented_button_selected_color=ui_color("#0F766E", "#0F766E"),
-            segmented_button_selected_hover_color=ui_color("#115E59", "#134E4A"),
-            segmented_button_unselected_color=ui_color("#E2E8F0", "#1F2937"),
-            segmented_button_unselected_hover_color=ui_color("#CBD5E1", "#334155"),
-            corner_radius=26,
-        )
-        self.tab_view.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 18))
-        self.main_panel.grid_rowconfigure(2, weight=1)
+        body = ctk.CTkFrame(self.main_panel, fg_color="transparent")
+        body.grid(row=2, column=0, sticky="nsew", padx=18, pady=(0, 12))
+        body.grid_columnconfigure(0, weight=6)
+        body.grid_columnconfigure(1, weight=5)
+        body.grid_rowconfigure(0, weight=1)
 
+        details_card = ctk.CTkFrame(body, fg_color=THEME["surface"], corner_radius=26, border_width=1, border_color=THEME["surface_border"])
+        details_card.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        details_card.grid_columnconfigure(0, weight=1)
+        details_card.grid_rowconfigure(0, weight=1)
+
+        self.tab_view = ctk.CTkTabview(
+            details_card,
+            fg_color=THEME["surface"],
+            segmented_button_selected_color=ui_color("#00B7D9", "#08BFD9"),
+            segmented_button_selected_hover_color=ui_color("#009CB9", "#059DB8"),
+            segmented_button_unselected_color=ui_color("#E2E8F0", "#20242C"),
+            segmented_button_unselected_hover_color=ui_color("#CBD5E1", "#292E37"),
+            corner_radius=24,
+        )
+        self.tab_view.grid(row=0, column=0, sticky="nsew", padx=10, pady=10)
         self._tab_names = {
             "summary": self.t("tabs.summary"),
             "scenes": self.t("tabs.scenes"),
             "json": self.t("tabs.json"),
-            "history": self.t("tabs.history"),
         }
         self.summary_tab = self.tab_view.add(self._tab_names["summary"])
         self.scenes_tab = self.tab_view.add(self._tab_names["scenes"])
         self.json_tab = self.tab_view.add(self._tab_names["json"])
-        self.history_tab = self.tab_view.add(self._tab_names["history"])
-
         self.summary_text = self._make_output_textbox(self.summary_tab)
         self.scenes_text = self._make_output_textbox(self.scenes_tab)
         self.json_text = self._make_output_textbox(self.json_tab)
 
-        self.history_tab.grid_columnconfigure(0, weight=1)
-        self.history_tab.grid_rowconfigure(1, weight=1)
-        history_header = ctk.CTkFrame(self.history_tab, fg_color="transparent")
-        history_header.grid(row=0, column=0, sticky="ew", padx=12, pady=(12, 6))
-        history_header.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(
-            history_header,
-            text=self.t("history.saved_projects"),
+        preview_card = ctk.CTkFrame(body, fg_color=THEME["surface"], corner_radius=26, border_width=1, border_color=THEME["surface_border"])
+        preview_card.grid(row=0, column=1, sticky="nsew")
+        preview_card.grid_columnconfigure(0, weight=1)
+        preview_card.grid_rowconfigure(1, weight=1)
+
+        preview_header = ctk.CTkFrame(preview_card, fg_color="transparent")
+        preview_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 10))
+        preview_header.grid_columnconfigure(0, weight=1)
+        self.preview_provider_badge = ctk.CTkLabel(
+            preview_header,
+            text="",
+            fg_color=THEME["pill"],
+            corner_radius=14,
             text_color=THEME["primary_text"],
-            font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
+            padx=12,
+            pady=6,
+            font=ctk.CTkFont("Segoe UI", 11, weight="bold"),
+        )
+        self.preview_provider_badge.grid(row=0, column=0, sticky="w")
+        self.preview_history_label = ctk.CTkLabel(
+            preview_header,
+            text="",
+            text_color=THEME["muted_text"],
+            font=ctk.CTkFont("Segoe UI", 11),
+        )
+        self.preview_history_label.grid(row=0, column=1, sticky="e")
+
+        self.preview_surface = ctk.CTkFrame(
+            preview_card,
+            fg_color=THEME["hero"],
+            corner_radius=32,
+            border_width=1,
+            border_color=ui_color("#0EA5B7", "#0B7E93"),
+        )
+        self.preview_surface.grid(row=1, column=0, sticky="nsew", padx=16)
+        self.preview_surface.grid_columnconfigure(0, weight=1)
+        self.preview_surface.grid_rowconfigure(1, weight=1)
+        self.preview_mode_badge = ctk.CTkLabel(
+            self.preview_surface,
+            text="",
+            fg_color=ui_color("#0F172A", "#181D25"),
+            corner_radius=14,
+            text_color=THEME["hero_text"],
+            padx=12,
+            pady=6,
+            font=ctk.CTkFont("Segoe UI", 11, weight="bold"),
+        )
+        self.preview_mode_badge.grid(row=0, column=0, sticky="nw", padx=16, pady=16)
+        self.preview_play_button = ctk.CTkButton(
+            self.preview_surface,
+            text="Play",
+            command=self._open_preview_target,
+            width=88,
+            height=88,
+            corner_radius=44,
+            fg_color=ui_color("#00B7D9", "#08BFD9"),
+            hover_color=ui_color("#009CB9", "#059DB8"),
+            font=ctk.CTkFont("Segoe UI", 16, weight="bold"),
+        )
+        self.preview_play_button.grid(row=1, column=0)
+        self.preview_status_badge = ctk.CTkLabel(
+            self.preview_surface,
+            text="",
+            text_color=THEME["soft_text"],
+            wraplength=300,
+            justify="center",
+            font=ctk.CTkFont("Segoe UI", 12),
+        )
+        self.preview_status_badge.grid(row=2, column=0, sticky="s", padx=18, pady=(16, 18))
+
+        preview_copy = ctk.CTkFrame(preview_card, fg_color="transparent")
+        preview_copy.grid(row=2, column=0, sticky="ew", padx=16, pady=(12, 16))
+        preview_copy.grid_columnconfigure(0, weight=1)
+        self.preview_title_label = ctk.CTkLabel(
+            preview_copy,
+            text="",
+            text_color=THEME["primary_text"],
+            justify="left",
+            anchor="w",
+            wraplength=360,
+            font=ctk.CTkFont("Segoe UI", 20, weight="bold"),
+        )
+        self.preview_title_label.grid(row=0, column=0, sticky="w")
+        self.preview_summary_label = ctk.CTkLabel(
+            preview_copy,
+            text="",
+            text_color=THEME["muted_text"],
+            justify="left",
+            anchor="w",
+            wraplength=360,
+            font=ctk.CTkFont("Segoe UI", 12),
+        )
+        self.preview_summary_label.grid(row=1, column=0, sticky="w", pady=(6, 6))
+        self.preview_meta_label = ctk.CTkLabel(
+            preview_copy,
+            text="",
+            text_color=THEME["soft_text"],
+            justify="left",
+            anchor="w",
+            wraplength=360,
+            font=ctk.CTkFont("Segoe UI", 11, weight="bold"),
+        )
+        self.preview_meta_label.grid(row=2, column=0, sticky="w")
+        self.preview_output_label = ctk.CTkLabel(
+            preview_copy,
+            text="",
+            text_color=THEME["muted_text"],
+            justify="left",
+            anchor="w",
+            wraplength=360,
+            font=ctk.CTkFont("Segoe UI", 11),
+        )
+        self.preview_output_label.grid(row=3, column=0, sticky="w", pady=(8, 0))
+
+        timeline_card = ctk.CTkFrame(self.main_panel, fg_color=THEME["surface"], corner_radius=26, border_width=1, border_color=THEME["surface_border"])
+        timeline_card.grid(row=3, column=0, sticky="ew", padx=18, pady=(0, 18))
+        timeline_card.grid_columnconfigure(0, weight=1)
+        timeline_header = ctk.CTkFrame(timeline_card, fg_color="transparent")
+        timeline_header.grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 10))
+        timeline_header.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            timeline_header,
+            text=self.t("workspace.timeline_title"),
+            text_color=THEME["primary_text"],
+            font=ctk.CTkFont("Segoe UI", 20, weight="bold"),
         ).grid(row=0, column=0, sticky="w")
-        ctk.CTkButton(
-            history_header,
-            text=self.t("buttons.refresh"),
-            command=self._load_history_buttons,
-            fg_color=ui_color("#1D4ED8", "#2563EB"),
-            hover_color=ui_color("#1E40AF", "#1D4ED8"),
-            width=110,
-        ).grid(row=0, column=1, sticky="e")
-        self.history_scroll = ctk.CTkScrollableFrame(self.history_tab, fg_color=THEME["surface_alt"], corner_radius=18)
-        self.history_scroll.grid(row=1, column=0, sticky="nsew", padx=12, pady=(0, 12))
-        self.history_scroll.grid_columnconfigure(0, weight=1)
+        self.timeline_summary_label = ctk.CTkLabel(
+            timeline_header,
+            text="",
+            text_color=THEME["muted_text"],
+            font=ctk.CTkFont("Segoe UI", 11),
+        )
+        self.timeline_summary_label.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.timeline_scroll = ctk.CTkScrollableFrame(
+            timeline_card,
+            fg_color=THEME["surface_alt"],
+            corner_radius=22,
+            orientation="horizontal",
+            height=194,
+            border_width=1,
+            border_color=THEME["surface_border"],
+        )
+        self.timeline_scroll.grid(row=1, column=0, sticky="ew", padx=16, pady=(0, 16))
+
+        self._refresh_workspace_header()
+        self._refresh_preview_card()
+        self._refresh_timeline()
+        self._refresh_asset_library()
+
+    def _append_agent_message(self, message: str, *, tone: str = "assistant") -> None:
+        if not hasattr(self, "agent_feed_scroll"):
+            return
+        normalized = " ".join(str(message).split())
+        if not normalized:
+            return
+        message_key = (tone, normalized)
+        if self._last_agent_message == message_key:
+            return
+        palette = {
+            "assistant": (ui_color("#E0F7FB", "#19222B"), ui_color("#B8E9F2", "#283744"), ui_color("#0F172A", "#E5E7EB")),
+            "success": (ui_color("#E8F8EC", "#16231B"), ui_color("#C2EBD0", "#24402F"), ui_color("#14532D", "#BBF7D0")),
+            "error": (ui_color("#FDEAEA", "#24161A"), ui_color("#F6CACA", "#4B2A31"), ui_color("#991B1B", "#FECACA")),
+            "system": (ui_color("#EEF3FA", "#171B22"), ui_color("#DCE5EF", "#2A2F38"), ui_color("#334155", "#CBD5E1")),
+        }
+        fg_color, border_color, text_color = palette.get(tone, palette["assistant"])
+        row = len(self._agent_message_widgets)
+        bubble = ctk.CTkFrame(
+            self.agent_feed_scroll,
+            fg_color=fg_color,
+            border_width=1,
+            border_color=border_color,
+            corner_radius=18,
+        )
+        bubble.grid(row=row, column=0, sticky="ew", padx=10, pady=(10 if row == 0 else 0, 10))
+        bubble.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            bubble,
+            text=tone.upper(),
+            text_color=text_color,
+            font=ctk.CTkFont("Segoe UI", 10, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+        ctk.CTkLabel(
+            bubble,
+            text=normalized,
+            text_color=text_color,
+            wraplength=296,
+            justify="left",
+            anchor="w",
+            font=ctk.CTkFont("Segoe UI", 12),
+        ).grid(row=1, column=0, sticky="ew", padx=12, pady=(0, 10))
+        self._agent_message_widgets.append(bubble)
+        while len(self._agent_message_widgets) > 18:
+            expired = self._agent_message_widgets.pop(0)
+            try:
+                expired.destroy()
+            except tk.TclError:
+                pass
+            for index, widget in enumerate(self._agent_message_widgets):
+                widget.grid_configure(row=index)
+        self._last_agent_message = message_key
+        self.after_idle(self._scroll_agent_feed_to_end)
+
+    def _scroll_agent_feed_to_end(self) -> None:
+        if not hasattr(self, "agent_feed_scroll"):
+            return
+        canvas = getattr(self.agent_feed_scroll, "_parent_canvas", None)
+        if canvas is not None:
+            try:
+                canvas.yview_moveto(1.0)
+            except tk.TclError:
+                pass
+
+    def _refresh_agent_context(self) -> None:
+        if not hasattr(self, "agent_context_label"):
+            return
+        provider = self.video_provider_var.get().strip() or "Storyboard local"
+        mode = self.mode_var.get().strip() or "Proyecto completo"
+        aspect_ratio = self.video_aspect_ratio_var.get().strip() or "9:16"
+        scene_count = self.scene_count_var.get().strip() or str(self.app_config.scene_count)
+        self.agent_context_label.configure(text=f"{mode}  |  {provider}  |  {aspect_ratio}  |  {scene_count} scenes")
+
+    def _refresh_workspace_header(self, project: VideoProject | None = None) -> None:
+        project = project or self.current_project
+        if not hasattr(self, "workspace_title_label"):
+            return
+        if project is None:
+            self.workspace_title_label.configure(text=self.t("header.title"))
+            self.workspace_subtitle_label.configure(text=self.t("header.subtitle"))
+            return
+        self.workspace_title_label.configure(text=project.title)
+        self.workspace_subtitle_label.configure(
+            text=self.t(
+                "workspace.project_meta",
+                count=len(project.scenes),
+                duration=project.estimated_total_duration_seconds,
+                provider=self.video_provider_var.get().strip() or "Storyboard local",
+            )
+        )
+
+    def _refresh_preview_card(self, project: VideoProject | None = None) -> None:
+        project = project or self.current_project
+        self._refresh_workspace_header(project)
+        if not hasattr(self, "preview_title_label"):
+            return
+
+        provider = self.video_provider_var.get().strip() or "Storyboard local"
+        if self.last_render_result is not None and self.last_render_result.provider:
+            provider = self.last_render_result.provider
+        self.preview_provider_badge.configure(text=self.t("workspace.preview_provider", provider=provider))
+
+        if self.current_history_path:
+            self.preview_history_label.configure(
+                text=self.t("workspace.preview_history", label=self._format_history_entry_date(self.current_history_path.stem))
+            )
+        else:
+            self.preview_history_label.configure(text="")
+
+        if project is None:
+            self.preview_mode_badge.configure(text=self.mode_var.get().strip() or "Proyecto completo")
+            self.preview_play_button.configure(text="Play")
+            self.preview_title_label.configure(text=self.t("workspace.preview_empty_title"))
+            self.preview_summary_label.configure(text=self.t("workspace.preview_empty"))
+            self.preview_meta_label.configure(text="")
+            self.preview_output_label.configure(text=self.t("workspace.preview_output_empty"))
+            self.preview_status_badge.configure(text=self.t("workspace.preview_waiting"))
+            return
+
+        destination = ""
+        if self.last_render_result is not None:
+            destination = str(self.last_render_result.file_path or self.last_render_result.remote_video_url or self.last_render_result.remote_video_id)
+
+        self.preview_mode_badge.configure(text=f"{project.video_format}  |  {project.generation_mode}")
+        self.preview_title_label.configure(text=project.title)
+        self.preview_summary_label.configure(text=self._truncate_preview_text(project.summary, 180))
+        self.preview_meta_label.configure(
+            text=self.t(
+                "workspace.project_meta",
+                count=len(project.scenes),
+                duration=project.estimated_total_duration_seconds,
+                provider=provider,
+            )
+        )
+        if destination:
+            self.preview_play_button.configure(text="Open")
+            self.preview_output_label.configure(text=self.t("workspace.preview_output", destination=destination))
+            self.preview_status_badge.configure(text=self.t("workspace.preview_ready", provider=provider))
+        else:
+            self.preview_play_button.configure(text="Render")
+            self.preview_output_label.configure(text=self.t("workspace.preview_output_empty"))
+            self.preview_status_badge.configure(text=self.t("workspace.preview_waiting"))
+
+    def _refresh_timeline(self, project: VideoProject | None = None) -> None:
+        project = project or self.current_project
+        if not hasattr(self, "timeline_scroll"):
+            return
+        for child in self.timeline_scroll.winfo_children():
+            child.destroy()
+        if project is None:
+            self.timeline_summary_label.configure(text=self.t("workspace.timeline_empty"))
+            ctk.CTkLabel(
+                self.timeline_scroll,
+                text=self.t("workspace.timeline_empty"),
+                text_color=THEME["muted_text"],
+                font=ctk.CTkFont("Segoe UI", 12),
+            ).grid(row=0, column=0, padx=12, pady=18, sticky="w")
+            return
+
+        palette = ["#00B7D9", "#F97316", "#22C55E", "#38BDF8", "#F43F5E", "#8B5CF6", "#EAB308", "#14B8A6"]
+        self.timeline_summary_label.configure(text=self.t("workspace.timeline_summary", count=len(project.scenes)))
+        for index, scene in enumerate(project.scenes):
+            accent = palette[index % len(palette)]
+            card = ctk.CTkFrame(
+                self.timeline_scroll,
+                fg_color=THEME["card_alt"],
+                border_width=1,
+                border_color=THEME["surface_border"],
+                corner_radius=20,
+                width=148,
+                height=150,
+            )
+            card.grid(row=0, column=index, padx=(0 if index == 0 else 10, 0), pady=10, sticky="ns")
+            card.grid_propagate(False)
+            ctk.CTkLabel(
+                card,
+                text=f"{self.t('project.scene')} {scene.scene_number}",
+                text_color=ui_color(accent, accent),
+                font=ctk.CTkFont("Segoe UI", 11, weight="bold"),
+            ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+            ctk.CTkLabel(
+                card,
+                text=scene.scene_title or scene.description or f"{self.t('project.scene')} {scene.scene_number}",
+                text_color=THEME["primary_text"],
+                wraplength=120,
+                justify="left",
+                anchor="w",
+                font=ctk.CTkFont("Segoe UI", 13, weight="bold"),
+            ).grid(row=1, column=0, sticky="w", padx=12)
+            ctk.CTkLabel(
+                card,
+                text=self._truncate_preview_text(scene.visual_description or scene.description or scene.narration, 92),
+                text_color=THEME["muted_text"],
+                wraplength=120,
+                justify="left",
+                anchor="w",
+                font=ctk.CTkFont("Segoe UI", 11),
+            ).grid(row=2, column=0, sticky="nw", padx=12, pady=(8, 6))
+            ctk.CTkLabel(
+                card,
+                text=self.t("workspace.scene_duration", seconds=scene.duration_seconds),
+                text_color=THEME["soft_text"],
+                font=ctk.CTkFont("Segoe UI", 10, weight="bold"),
+            ).grid(row=3, column=0, sticky="sw", padx=12, pady=(0, 12))
+
+    def _refresh_asset_library(self, project: VideoProject | None = None) -> None:
+        project = project or self.current_project
+        if not hasattr(self, "asset_library_scroll"):
+            return
+        for child in self.asset_library_scroll.winfo_children():
+            child.destroy()
+        if project is None:
+            self.assets_summary_label.configure(text=self.t("workspace.assets_empty"))
+            ctk.CTkLabel(
+                self.asset_library_scroll,
+                text=self.t("workspace.assets_empty"),
+                text_color=THEME["muted_text"],
+                wraplength=220,
+                justify="left",
+                font=ctk.CTkFont("Segoe UI", 12),
+            ).grid(row=0, column=0, sticky="w", padx=12, pady=12)
+            return
+
+        self.assets_summary_label.configure(text=self.t("workspace.assets_summary", count=len(project.scenes)))
+        summary_card = ctk.CTkFrame(
+            self.asset_library_scroll,
+            fg_color=THEME["card_alt"],
+            corner_radius=18,
+            border_width=1,
+            border_color=THEME["surface_border"],
+        )
+        summary_card.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 8))
+        summary_card.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(
+            summary_card,
+            text=project.title,
+            text_color=THEME["primary_text"],
+            font=ctk.CTkFont("Segoe UI", 15, weight="bold"),
+        ).grid(row=0, column=0, sticky="w", padx=12, pady=(12, 4))
+        ctk.CTkLabel(
+            summary_card,
+            text=self._truncate_preview_text(project.general_script or project.summary, 180),
+            text_color=THEME["muted_text"],
+            wraplength=230,
+            justify="left",
+            font=ctk.CTkFont("Segoe UI", 11),
+        ).grid(row=1, column=0, sticky="w", padx=12, pady=(0, 12))
+
+        for index, scene in enumerate(project.scenes, start=1):
+            card = ctk.CTkFrame(
+                self.asset_library_scroll,
+                fg_color=THEME["surface_alt"],
+                corner_radius=18,
+                border_width=1,
+                border_color=THEME["surface_border"],
+            )
+            card.grid(row=index, column=0, sticky="ew", padx=10, pady=(0, 8))
+            card.grid_columnconfigure(0, weight=1)
+            ctk.CTkLabel(
+                card,
+                text=f"{self.t('project.scene')} {scene.scene_number}",
+                text_color=THEME["primary_text"],
+                font=ctk.CTkFont("Segoe UI", 12, weight="bold"),
+            ).grid(row=0, column=0, sticky="w", padx=12, pady=(10, 2))
+            ctk.CTkLabel(
+                card,
+                text=scene.scene_title or self._truncate_preview_text(scene.description, 48),
+                text_color=THEME["soft_text"],
+                wraplength=220,
+                justify="left",
+                font=ctk.CTkFont("Segoe UI", 11),
+            ).grid(row=1, column=0, sticky="w", padx=12)
+            ctk.CTkLabel(
+                card,
+                text=self._truncate_preview_text(scene.visual_prompt or scene.visual_description or scene.narration, 160),
+                text_color=THEME["muted_text"],
+                wraplength=220,
+                justify="left",
+                font=ctk.CTkFont("Segoe UI", 10),
+            ).grid(row=2, column=0, sticky="w", padx=12, pady=(6, 10))
+
+    def _truncate_preview_text(self, text: str, limit: int) -> str:
+        compact = " ".join(str(text or "").split())
+        if len(compact) <= limit:
+            return compact
+        return f"{compact[: max(0, limit - 3)].rstrip()}..."
+
+    def _format_history_entry_title(self, file_stem: str) -> str:
+        chunks = file_stem.split("_", maxsplit=2)
+        if len(chunks) >= 3:
+            return chunks[2].replace("_", " ")
+        if len(chunks) == 2:
+            return chunks[1].replace("_", " ")
+        return file_stem.replace("_", " ")
+
+    def _format_history_entry_date(self, stamp: str) -> str:
+        digits = stamp.split("_", maxsplit=1)[0]
+        try:
+            return datetime.strptime(digits, "%Y%m%d").strftime("%Y-%m-%d")
+        except ValueError:
+            return digits
+
+    def _open_preview_target(self) -> None:
+        if self.last_render_result is not None:
+            destination = self.last_render_result.file_path or self.last_render_result.remote_video_url
+            if destination:
+                os.startfile(str(destination))  # type: ignore[attr-defined]
+                return
+        if self.current_project:
+            self.generate_video()
+            return
+        self.open_output_folder()
 
     def _make_card(self, parent: ctk.CTkBaseClass, title: str, subtitle: str) -> ctk.CTkFrame:
         card = ctk.CTkFrame(parent, fg_color=THEME["card"], corner_radius=22)
@@ -1161,7 +1901,7 @@ class VideoGeniusApp(ctk.CTk):
         ctk.CTkLabel(
             card,
             text=title,
-            text_color=THEME["hero_text"],
+            text_color=THEME["primary_text"],
             font=ctk.CTkFont("Segoe UI", 18, weight="bold"),
         ).grid(row=0, column=0, sticky="w", padx=14, pady=(14, 4))
         ctk.CTkLabel(
@@ -1286,6 +2026,8 @@ class VideoGeniusApp(ctk.CTk):
             self.local_video_button.configure(state="normal" if uses_comfyui_controls and not self.is_busy else "disabled")
         self._sync_avatar_ui()
         self._sync_tts_ui()
+        self._refresh_agent_context()
+        self._refresh_preview_card()
 
     def _sync_avatar_ui(self) -> None:
         use_avatar = self.video_provider_var.get().strip() == "Local Avatar video"
@@ -2060,6 +2802,7 @@ class VideoGeniusApp(ctk.CTk):
         self._toggle_busy_state(True)
         self._set_status(f"{label}...")
         self._set_progress_ui(0.02, label)
+        self._append_agent_message(f"{label}...", tone="system")
         started_at = time.perf_counter()
         self.logger.info("Background task started | task=%s", label)
 
@@ -2092,7 +2835,9 @@ class VideoGeniusApp(ctk.CTk):
                     self._set_status(message)
                 elif event_type == "error":
                     self._set_progress_ui(0, self.t("progress.error_detail"))
-                    self._set_status(str(event.get("message", "Unknown error")), error=True)
+                    error_message = str(event.get("message", "Unknown error"))
+                    self._set_status(error_message, error=True)
+                    self._append_agent_message(error_message, tone="error")
                 elif event_type == "connection":
                     models = event.get("models", [])
                     message = str(event.get("message", ""))
@@ -2102,6 +2847,7 @@ class VideoGeniusApp(ctk.CTk):
                         if not self.model_var.get().strip():
                             self.model_var.set(models[0])
                     self._set_status(message)
+                    self._append_agent_message(message, tone="assistant")
                 elif event_type == "local_video_connection":
                     message = str(event.get("message", ""))
                     checkpoints = event.get("checkpoints", [])
@@ -2111,6 +2857,7 @@ class VideoGeniusApp(ctk.CTk):
                             self.comfyui_checkpoint_var.set(checkpoints[0])
                     self.render_chip.configure(text=self.t("status.local_connection_chip", message=message))
                     self._set_status(message)
+                    self._append_agent_message(message, tone="assistant")
                 elif event_type == "environment":
                     status = event.get("status")
                     summary = str(event.get("summary", ""))
@@ -2154,7 +2901,10 @@ class VideoGeniusApp(ctk.CTk):
                     if summary and hasattr(self, "setup_summary_label"):
                         self.setup_summary_label.configure(text=summary)
                     self._sync_video_provider_ui()
-                    self._set_status(str(event.get("message", summary or self.t("status.environment_updated"))), success=bool(event.get("success", False)))
+                    environment_message = str(event.get("message", summary or self.t("status.environment_updated")))
+                    is_success = bool(event.get("success", False))
+                    self._set_status(environment_message, success=is_success)
+                    self._append_agent_message(environment_message, tone="success" if is_success else "assistant")
                 elif event_type == "render_capabilities":
                     detection = event.get("detection")
                     if isinstance(detection, GPUDetectionResult):
@@ -2167,16 +2917,26 @@ class VideoGeniusApp(ctk.CTk):
                 elif event_type == "project":
                     self.current_project = event["project"]
                     self.current_history_path = event.get("history_path")
+                    self.last_render_result = None
                     self._render_project(self.current_project)
                     self._load_history_buttons()
                     if bool(event.get("finished", True)):
                         self._set_progress_ui(1, self.t("status.progress_done"))
                         self._set_status(self.t("status.project_generated_saved"), success=True)
+                        self._append_agent_message(
+                            self.t("workspace.project_agent_saved", title=self.current_project.title, count=len(self.current_project.scenes)),
+                            tone="success",
+                        )
                     else:
                         self._set_status(self.t("status.project_generated_rendering"))
+                        self._append_agent_message(
+                            self.t("workspace.project_agent_rendering", title=self.current_project.title),
+                            tone="assistant",
+                        )
                 elif event_type == "video":
                     self._set_progress_ui(1, self.t("progress.completed_detail"))
                     result = event["result"]
+                    self.last_render_result = result
                     destination = result.file_path or result.remote_video_url or result.remote_video_id
                     workers_used = result.metadata.get("workers_used")
                     encoder_used = result.metadata.get("video_encoder")
@@ -2195,6 +2955,11 @@ class VideoGeniusApp(ctk.CTk):
                         self._set_status(self.t("status.video_completed_with_encoder", provider=result.provider, encoder=encoder_used, destination=destination), success=True)
                     else:
                         self._set_status(self.t("status.video_completed", provider=result.provider, destination=destination), success=True)
+                    self._refresh_preview_card(self.current_project)
+                    self._append_agent_message(
+                        self.t("workspace.video_agent_ready", provider=result.provider, destination=destination),
+                        tone="success",
+                    )
                 elif event_type == "done":
                     self.is_busy = False
                     self._toggle_busy_state(False)
@@ -2221,12 +2986,15 @@ class VideoGeniusApp(ctk.CTk):
             self.export_csv_button,
             self.video_button,
             self.folder_button,
+            self.preview_play_button,
         ]:
             button.configure(state=state)
         self._sync_video_provider_ui()
 
     def _set_status(self, message: str, *, success: bool = False, error: bool = False) -> None:
         self.status_label.configure(text=message)
+        if hasattr(self, "agent_activity_label"):
+            self.agent_activity_label.configure(text=message)
         if error:
             self.status_label.configure(text_color=THEME["status_error"])
         elif success:
@@ -2241,6 +3009,8 @@ class VideoGeniusApp(ctk.CTk):
             self.progress_percent_label.configure(text=f"{round(normalized * 100):d}%")
         if hasattr(self, "progress_detail_label") and detail:
             self.progress_detail_label.configure(text=self.t("progress.detail", detail=detail))
+        if hasattr(self, "preview_status_badge") and detail and (self.current_project or normalized > 0):
+            self.preview_status_badge.configure(text=detail)
 
     def _render_project(self, project: VideoProject) -> None:
         summary_lines = [
@@ -2283,6 +3053,10 @@ class VideoGeniusApp(ctk.CTk):
         self._write_textbox(self.scenes_text, "\n\n".join(scene_blocks))
         self._write_textbox(self.json_text, json.dumps(project.to_dict(), indent=2, ensure_ascii=False))
         self.tab_view.set(self._tab_names["summary"])
+        self._refresh_agent_context()
+        self._refresh_preview_card(project)
+        self._refresh_timeline(project)
+        self._refresh_asset_library(project)
 
     def _write_textbox(self, textbox: ctk.CTkTextbox, content: str) -> None:
         textbox.configure(state="normal")
@@ -2671,6 +3445,8 @@ class VideoGeniusApp(ctk.CTk):
             child.destroy()
 
         entries = self.history_service.list_entries(limit=self.app_config.history_limit)
+        if hasattr(self, "history_summary_label"):
+            self.history_summary_label.configure(text=self.t("workspace.history_summary", count=len(entries)))
         if not entries:
             ctk.CTkLabel(
                 self.history_scroll,
@@ -2680,13 +3456,17 @@ class VideoGeniusApp(ctk.CTk):
             return
 
         for index, entry in enumerate(entries):
+            title = self._format_history_entry_title(entry.file_path.stem)
+            date_label = self._format_history_entry_date(entry.file_path.stem)
+            is_selected = self.current_history_path == entry.file_path
             button = ctk.CTkButton(
                 self.history_scroll,
-                text=entry.file_path.stem,
+                text=f"{title}\n{date_label}",
                 anchor="w",
-                fg_color=THEME["history_button"],
+                fg_color=ui_color("#DDF7FC", "#17313A") if is_selected else THEME["history_button"],
                 text_color=THEME["primary_text"],
                 hover_color=THEME["history_hover"],
+                height=72,
                 command=lambda item=entry: self.load_history_entry(item),
             )
             button.grid(row=index, column=0, sticky="ew", padx=10, pady=(8 if index == 0 else 0, 8))
@@ -2699,6 +3479,7 @@ class VideoGeniusApp(ctk.CTk):
             return
         self.current_project = project
         self.current_history_path = entry.file_path
+        self.last_render_result = None
         self.topic_text.delete("1.0", "end")
         self.topic_text.insert("1.0", project.source_topic)
         self.visual_style_var.set(project.visual_style)
@@ -2711,7 +3492,9 @@ class VideoGeniusApp(ctk.CTk):
         self.scene_count_var.set(str(len(project.scenes)))
         self._schedule_save()
         self._render_project(project)
+        self._load_history_buttons()
         self._set_status(self.t("status.history_loaded", name=entry.file_path.name), success=True)
+        self._append_agent_message(self.t("status.history_loaded", name=entry.file_path.name), tone="assistant")
 
     def show_about_dialog(self) -> None:
         dialog = ctk.CTkToplevel(self)
@@ -2757,6 +3540,17 @@ class VideoGeniusApp(ctk.CTk):
         self.language_var.set("Espanol")
         self.scene_count_var.set("6")
         self.duration_var.set("60")
+        self.current_project = None
+        self.current_history_path = None
+        self.last_render_result = None
+        self._write_textbox(self.summary_text, self.t("output.placeholder"))
+        self._write_textbox(self.scenes_text, self.t("output.placeholder"))
+        self._write_textbox(self.json_text, self.t("output.placeholder"))
+        self._refresh_agent_context()
+        self._refresh_preview_card()
+        self._refresh_timeline()
+        self._refresh_asset_library()
+        self._load_history_buttons()
         self._schedule_save()
         self._set_status(self.t("status.project_reset"))
 

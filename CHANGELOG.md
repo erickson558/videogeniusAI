@@ -1,5 +1,11 @@
 # Changelog
 
+## V0.1.20 - 2026-04-03
+
+- Refactored the desktop shell into a HeyGen-inspired dark workspace with an agent column, asset/video library, preview panel, and horizontal timeline.
+- Kept the existing generation and render backend intact while wiring real project data into the new preview, history, asset, and activity surfaces.
+- Added release metadata updates for `V0.1.20` across the app, docs, and Windows executable version info.
+
 ## V0.1.19 - 2026-04-02
 
 - Fixed Windows executable packaging by compiling with the project `.venv`, so `customtkinter` and its assets are bundled reliably.

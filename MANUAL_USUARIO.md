@@ -2,7 +2,7 @@
 
 ## VideoGeniusAI
 
-Version actual: `V0.1.19`
+Version actual: `V0.1.20`
 
 VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para escribir el proyecto de video y puede producir el MP4 final de tres formas:
 
@@ -10,7 +10,7 @@ VideoGeniusAI es una aplicacion de escritorio en Python que usa `LM Studio` para
 - `Local AI video` con `ComfyUI + FFmpeg`, voz `Windows local` por defecto y `Piper` opcional
 - `Local Avatar video` con `ComfyUI + EchoMimic + VideoHelperSuite`, imagen base del avatar y narracion local
 
-La GUI ahora tiene un flujo rapido llamado `Quick setup` para que escribas el prompt y generes el video completo con un solo boton, y un bloque `Instalacion guiada` para preparar el entorno automaticamente.
+La GUI ahora usa un workspace oscuro tipo studio con tres zonas: `Video Agent` para escribir el brief y seguir la actividad, `Videos y assets` para el historial y las escenas reutilizables, y un area principal con preview, detalles y timeline.
 
 La version actual tambien mantiene la ventana visible cuando una posicion guardada queda fuera de pantalla, refuerza la generacion JSON para trabajar mejor con modelos locales de LM Studio, reparte mejor el modo `Local Avatar video` entre varios workers de ComfyUI y conserva la duracion planificada aunque la voz local termine antes.
 
